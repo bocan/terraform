@@ -8,13 +8,14 @@ import (
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/state"
-	"github.com/hashicorp/terraform/state/remote"
 	"github.com/hashicorp/terraform/states"
+	"github.com/hashicorp/terraform/states/remote"
+	"github.com/hashicorp/terraform/states/statemgr"
 
-	"github.com/aliyun/aliyun-tablestore-go-sdk/tablestore"
 	"log"
 	"path"
+
+	"github.com/aliyun/aliyun-tablestore-go-sdk/tablestore"
 )
 
 const (
@@ -38,27 +39,11 @@ func (b *Backend) remoteClient(name string) (*RemoteClient, error) {
 		otsClient:            b.otsClient,
 	}
 	if b.otsEndpoint != "" && b.otsTable != "" {
-		table, err := b.otsClient.DescribeTable(&tablestore.DescribeTableRequest{
+		_, err := b.otsClient.DescribeTable(&tablestore.DescribeTableRequest{
 			TableName: b.otsTable,
 		})
 		if err != nil {
 			return client, fmt.Errorf("Error describing table store %s: %#v", b.otsTable, err)
-		}
-		for _, t := range table.TableMeta.SchemaEntry {
-			pkMeta := TableStorePrimaryKeyMeta{
-				PKName: *t.Name,
-			}
-			if *t.Type == tablestore.PrimaryKeyType_INTEGER {
-				pkMeta.PKType = "Integer"
-			} else if *t.Type == tablestore.PrimaryKeyType_STRING {
-				pkMeta.PKType = "String"
-			} else if *t.Type == tablestore.PrimaryKeyType_BINARY {
-				pkMeta.PKType = "Binary"
-			} else {
-				return client, fmt.Errorf("Unsupported PrimaryKey type: %d.", *t.Type)
-			}
-			client.otsTabkePK = pkMeta
-			break
 		}
 	}
 
@@ -72,28 +57,39 @@ func (b *Backend) Workspaces() ([]string, error) {
 	}
 
 	var options []oss.Option
-	options = append(options, oss.Prefix(b.statePrefix+"/"))
+	options = append(options, oss.Prefix(b.statePrefix+"/"), oss.MaxKeys(1000))
 	resp, err := bucket.ListObjects(options...)
-
 	if err != nil {
 		return nil, err
 	}
 
 	result := []string{backend.DefaultStateName}
 	prefix := b.statePrefix
-	for _, obj := range resp.Objects {
-		// we have 3 parts, the state prefix, the workspace name, and the state file: <prefix>/<worksapce-name>/<key>
-		if path.Join(b.statePrefix, b.stateKey) == obj.Key {
-			// filter the default workspace
-			continue
+	lastObj := ""
+	for {
+		for _, obj := range resp.Objects {
+			// we have 3 parts, the state prefix, the workspace name, and the state file: <prefix>/<worksapce-name>/<key>
+			if path.Join(b.statePrefix, b.stateKey) == obj.Key {
+				// filter the default workspace
+				continue
+			}
+			lastObj = obj.Key
+			parts := strings.Split(strings.TrimPrefix(obj.Key, prefix+"/"), "/")
+			if len(parts) > 0 && parts[0] != "" {
+				result = append(result, parts[0])
+			}
 		}
-
-		parts := strings.Split(strings.TrimPrefix(obj.Key, prefix+"/"), "/")
-		if len(parts) > 0 && parts[0] != "" {
-			result = append(result, parts[0])
+		if resp.IsTruncated {
+			if len(options) == 3 {
+				options[2] = oss.Marker(lastObj)
+			} else {
+				options = append(options, oss.Marker(lastObj))
+			}
+			resp, err = bucket.ListObjects(options...)
+		} else {
+			break
 		}
 	}
-
 	sort.Strings(result[1:])
 	return result, nil
 }
@@ -110,7 +106,7 @@ func (b *Backend) DeleteWorkspace(name string) error {
 	return client.Delete()
 }
 
-func (b *Backend) StateMgr(name string) (state.State, error) {
+func (b *Backend) StateMgr(name string) (statemgr.Full, error) {
 	client, err := b.remoteClient(name)
 	if err != nil {
 		return nil, err
@@ -135,7 +131,7 @@ func (b *Backend) StateMgr(name string) (state.State, error) {
 	// We need to create the object so it's listed by States.
 	if !exists {
 		// take a lock on this state while we write it
-		lockInfo := state.NewLockInfo()
+		lockInfo := statemgr.NewLockInfo()
 		lockInfo.Operation = "init"
 		lockId, err := client.Lock(lockInfo)
 		if err != nil {

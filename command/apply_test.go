@@ -23,7 +23,6 @@ import (
 	"github.com/hashicorp/terraform/configs/configschema"
 	"github.com/hashicorp/terraform/plans"
 	"github.com/hashicorp/terraform/providers"
-	"github.com/hashicorp/terraform/state"
 	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/states/statemgr"
 	"github.com/hashicorp/terraform/terraform"
@@ -203,10 +202,10 @@ func TestApply_parallelism(t *testing.T) {
 				NewState: cty.EmptyObjectVal,
 			}
 		}
-		providerFactories[addrs.NewLegacyProvider(name)] = providers.FactoryFixed(provider)
+		providerFactories[addrs.NewDefaultProvider(name)] = providers.FactoryFixed(provider)
 	}
 	testingOverrides := &testingOverrides{
-		ProviderResolver: providers.ResolverFixed(providerFactories),
+		Providers: providerFactories,
 	}
 
 	ui := new(cli.MockUi)
@@ -305,8 +304,8 @@ func TestApply_defaultState(t *testing.T) {
 	}
 
 	// create an existing state file
-	localState := &state.LocalState{Path: statePath}
-	if err := localState.WriteState(terraform.NewState()); err != nil {
+	localState := statemgr.NewFilesystem(statePath)
+	if err := localState.WriteState(states.NewState()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -833,7 +832,10 @@ func TestApply_refresh(t *testing.T) {
 				AttrsJSON: []byte(`{"ami":"bar"}`),
 				Status:    states.ObjectReady,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewDefaultProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, originalState)
@@ -987,7 +989,10 @@ func TestApply_state(t *testing.T) {
 				AttrsJSON: []byte(`{"ami":"foo"}`),
 				Status:    states.ObjectReady,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewDefaultProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, originalState)
@@ -1102,7 +1107,7 @@ func TestApply_sensitiveOutput(t *testing.T) {
 	}
 
 	output := ui.OutputWriter.String()
-	if !strings.Contains(output, "notsensitive = Hello world") {
+	if !strings.Contains(output, "notsensitive = \"Hello world\"") {
 		t.Fatalf("bad: output should contain 'notsensitive' output\n%s", output)
 	}
 	if !strings.Contains(output, "sensitive = <sensitive>") {
@@ -1351,7 +1356,10 @@ func TestApply_backup(t *testing.T) {
 				AttrsJSON: []byte("{\n            \"id\": \"bar\"\n          }"),
 				Status:    states.ObjectReady,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewDefaultProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, originalState)
@@ -1652,7 +1660,10 @@ func applyFixturePlanFile(t *testing.T) string {
 			Type: "test_instance",
 			Name: "foo",
 		}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
-		ProviderAddr: addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+		ProviderAddr: addrs.AbsProviderConfig{
+			Provider: addrs.NewDefaultProvider("test"),
+			Module:   addrs.RootModule,
+		},
 		ChangeSrc: plans.ChangeSrc{
 			Action: plans.Create,
 			Before: priorValRaw,

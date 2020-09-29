@@ -348,6 +348,11 @@ module "vpc" {
 }
 ```
 
+-> **Note:** If the content of the archive file is a directory, you will need to
+include that directory in the module source. Read the section on 
+[Modules in Package Sub-directories](#modules-in-package-sub-directories) for more
+information.
+
 ## S3 Bucket
 
 You can use archives stored in S3 as module sources using the special `s3::`
@@ -359,6 +364,8 @@ module "consul" {
   source = "s3::https://s3-eu-west-1.amazonaws.com/examplecorp-terraform-modules/vpc.zip"
 }
 ```
+
+-> **Note:** Buckets in AWS's us-east-1 region must use the hostname `s3.amazonaws.com` (instead of `s3-us-east-1.amazonaws.com`).
 
 The `s3::` prefix causes Terraform to use AWS-style authentication when
 accessing the given URL. As a result, this scheme may also work for other

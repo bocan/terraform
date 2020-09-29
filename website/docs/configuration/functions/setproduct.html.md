@@ -55,7 +55,7 @@ resources.
 ]
 ```
 
-You must past at least two arguments to this function.
+You must pass at least two arguments to this function.
 
 Although defined primarily for sets, this function can also work with lists.
 If all of the given arguments are lists then the result is a list, preserving
@@ -219,10 +219,11 @@ elements in the input variables.
 
 * [`contains`](./contains.html) tests whether a given list or set contains
   a given element value.
-* [`flatten`](./flatten.html) is useful for flattening heirarchical data
+* [`flatten`](./flatten.html) is useful for flattening hierarchical data
   into a single list, for situations where the relationships between two
   object types are defined explicitly.
 * [`setintersection`](./setintersection.html) computes the _intersection_ of
   multiple sets.
+* [`setsubtract`](./setsubtract.html) computes the _relative complement_ of two sets
 * [`setunion`](./setunion.html) computes the _union_ of multiple
   sets.

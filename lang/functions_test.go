@@ -67,6 +67,13 @@ func TestFunctions(t *testing.T) {
 			},
 		},
 
+		"alltrue": {
+			{
+				`alltrue([true])`,
+				cty.True,
+			},
+		},
+
 		"base64decode": {
 			{
 				`base64decode("YWJjMTIzIT8kKiYoKSctPUB+")`,
@@ -472,6 +479,12 @@ func TestFunctions(t *testing.T) {
 				`jsonencode({"hello"="world"})`,
 				cty.StringVal("{\"hello\":\"world\"}"),
 			},
+			// We are intentionally choosing to escape <, >, and & characters
+			// to preserve backwards compatibility with Terraform 0.11
+			{
+				`jsonencode({"hello"="<cats & kittens>"})`,
+				cty.StringVal("{\"hello\":\"\\u003ccats \\u0026 kittens\\u003e\"}"),
+			},
 		},
 
 		"keys": {
@@ -687,6 +700,15 @@ func TestFunctions(t *testing.T) {
 			},
 		},
 
+		"setsubtract": {
+			{
+				`setsubtract(["a", "b", "c"], ["a", "c"])`,
+				cty.SetVal([]cty.Value{
+					cty.StringVal("b"),
+				}),
+			},
+		},
+
 		"setunion": {
 			{
 				`setunion(["a", "b"], ["b", "c"], ["d"])`,
@@ -774,6 +796,13 @@ func TestFunctions(t *testing.T) {
 			{
 				`substr("hello world", 1, 4)`,
 				cty.StringVal("ello"),
+			},
+		},
+
+		"sum": {
+			{
+				`sum([2340.5,10,3])`,
+				cty.NumberFloatVal(2353.5),
 			},
 		},
 
@@ -961,6 +990,12 @@ func TestFunctions(t *testing.T) {
 			{
 				`yamldecode("true")`,
 				cty.True,
+			},
+			{
+				`yamldecode("key: 0ba")`,
+				cty.ObjectVal(map[string]cty.Value{
+					"key": cty.StringVal("0ba"),
+				}),
 			},
 		},
 

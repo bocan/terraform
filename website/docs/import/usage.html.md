@@ -8,12 +8,22 @@ description: |-
 
 # Import Usage
 
+> For a hands-on tutorial, try the [Import Terraform Configuration](https://learn.hashicorp.com/terraform/state/import?utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) guide on HashiCorp Learn.
+
 The `terraform import` command is used to import existing infrastructure.
 
 The command currently can only import one resource at a time. This means
 you can't yet point Terraform import to an entire collection of resources
 such as an AWS VPC and import all of it. This workflow will be improved in a
 future version of Terraform.
+
+~> Warning: Terraform expects that each remote object it is managing will be
+bound to only one resource address, which is normally guaranteed by Terraform
+itself having created all objects. If you import existing objects into Terraform,
+be careful to import each remote object to only one Terraform resource address.
+If you import the same object multiple times, Terraform may exhibit unwanted
+behavior. For more information on this assumption, see
+[the State section](/docs/state/).
 
 To import a resource, first write a resource block for it in your
 configuration, establishing the name by which it will be known to Terraform:
@@ -64,8 +74,8 @@ align with the current (or desired) state of the imported object.
 
 The above import is considered a "simple import": one resource is imported
 into the state file. An import may also result in a "complex import" where
-multiple resources are imported. For example, an AWS security group imports
-an `aws_security_group` but also one `aws_security_group_rule` for each rule.
+multiple resources are imported. For example, an AWS network ACL imports
+an `aws_network_acl` but also one `aws_network_acl_rule` for each rule.
 
 In this scenario, the secondary resources will not already exist in
 configuration, so it is necessary to consult the import output and create
@@ -74,3 +84,8 @@ not done, Terraform will plan to destroy the imported objects on the next run.
 
 If you want to rename or otherwise move the imported resources, the
 [state management commands](/docs/commands/state/index.html) can be used.
+
+## Hands-On Tutorial
+
+You can also follow the [Terraform Import tutorial](https://learn.hashicorp.com/tutorials/terraform/state-import?utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) on HashiCorp learn for a hands-on
+introduction to using the `terraform import` command.

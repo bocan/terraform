@@ -8,6 +8,8 @@ description: |-
 
 # Command: import
 
+> For a hands-on tutorial, try the [Import Terraform Configuration](https://learn.hashicorp.com/terraform/state/import?utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) tutorial on HashiCorp Learn.
+
 The `terraform import` command is used to
 [import existing resources](/docs/import/index.html)
 into Terraform.
@@ -21,13 +23,21 @@ state at the given ADDRESS.
 
 ADDRESS must be a valid [resource address](/docs/internals/resource-addressing.html).
 Because any resource address is valid, the import command can import resources
-into modules as well directly into the root of your state.
+into modules as well as directly into the root of your state.
 
 ID is dependent on the resource type being imported. For example, for AWS
 instances it is the instance ID (`i-abcd1234`) but for AWS Route53 zones
 it is the zone ID (`Z12ABC4UGMOZ2N`). Please reference the provider documentation for details
 on the ID format. If you're unsure, feel free to just try an ID. If the ID
 is invalid, you'll just receive an error message.
+
+~> Warning: Terraform expects that each remote object it is managing will be
+bound to only one resource address, which is normally guaranteed by Terraform
+itself having created all objects. If you import existing objects into Terraform,
+be careful to import each remote object to only one Terraform resource address.
+If you import the same object multiple times, Terraform may exhibit unwanted
+behavior. For more information on this assumption, see
+[the State section](/docs/state/).
 
 The command-line flags are all optional. The list of available flags are:
 

@@ -24,11 +24,7 @@ type ShowCommand struct {
 }
 
 func (c *ShowCommand) Run(args []string) int {
-	args, err := c.Meta.process(args, false)
-	if err != nil {
-		return 1
-	}
-
+	args = c.Meta.process(args)
 	cmdFlags := c.Meta.defaultFlagSet("show")
 	var jsonOutput bool
 	cmdFlags.BoolVar(&jsonOutput, "json", false, "produce JSON output")
@@ -48,6 +44,7 @@ func (c *ShowCommand) Run(args []string) int {
 	}
 
 	// Check for user-supplied plugin path
+	var err error
 	if c.pluginPath, err = c.loadPluginPath(); err != nil {
 		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
 		return 1
@@ -133,7 +130,11 @@ func (c *ShowCommand) Run(args []string) int {
 			}
 		}
 	} else {
-		env := c.Workspace()
+		env, err := c.Workspace()
+		if err != nil {
+			c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+			return 1
+		}
 		stateFile, stateErr = getStateFromEnv(b, env)
 		if stateErr != nil {
 			c.Ui.Error(stateErr.Error())
@@ -162,7 +163,10 @@ func (c *ShowCommand) Run(args []string) int {
 		// package rather than in the backends themselves, but for now we're
 		// accepting this oddity because "terraform show" is a less commonly
 		// used way to render a plan than "terraform plan" is.
-		localBackend.RenderPlan(plan, stateFile.State, schemas, c.Ui, c.Colorize())
+		// We're setting priorState to null because a saved plan file only
+		// records the base state (possibly updated by refresh), not the
+		// prior state (direct result of the previous apply).
+		localBackend.RenderPlan(plan, stateFile.State, nil, schemas, c.Ui, c.Colorize())
 		return 0
 	}
 

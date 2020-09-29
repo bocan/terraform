@@ -3,11 +3,16 @@ package command
 import (
 	"bytes"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform/configs/configschema"
+	"github.com/hashicorp/terraform/helper/copy"
+	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // ConsoleCommand is tested primarily with tests in the "repl" package.
@@ -22,7 +27,7 @@ func TestConsole_basic(t *testing.T) {
 	defer testFixCwd(t, tmp, cwd)
 
 	p := testProvider()
-	ui := new(cli.MockUi)
+	ui := cli.NewMockUi()
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
@@ -58,7 +63,17 @@ func TestConsole_tfvars(t *testing.T) {
 	}
 
 	p := testProvider()
-	ui := new(cli.MockUi)
+	p.GetSchemaReturn = &terraform.ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"value": {Type: cty.String, Optional: true},
+				},
+			},
+		},
+	}
+
+	ui := cli.NewMockUi()
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
@@ -80,7 +95,7 @@ func TestConsole_tfvars(t *testing.T) {
 	}
 
 	actual := output.String()
-	if actual != "bar\n" {
+	if actual != "\"bar\"\n" {
 		t.Fatalf("bad: %q", actual)
 	}
 }
@@ -96,7 +111,16 @@ func TestConsole_unsetRequiredVars(t *testing.T) {
 	defer testFixCwd(t, tmp, cwd)
 
 	p := testProvider()
-	ui := new(cli.MockUi)
+	p.GetSchemaReturn = &terraform.ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"value": {Type: cty.String, Optional: true},
+				},
+			},
+		},
+	}
+	ui := cli.NewMockUi()
 	c := &ConsoleCommand{
 		Meta: Meta{
 			testingOverrides: metaOverridesForProvider(p),
@@ -116,20 +140,54 @@ func TestConsole_unsetRequiredVars(t *testing.T) {
 	code := c.Run(args)
 	outCloser()
 
-	// Because we're running "terraform console" in piped input mode, we're
-	// expecting it to return a nonzero exit status here but the message
-	// must be the one indicating that it did attempt to evaluate var.foo and
-	// got an unknown value in return, rather than an error about var.foo
-	// not being set or a failure to prompt for it.
-	if code == 0 {
-		t.Fatalf("unexpected success\n%s", ui.OutputWriter.String())
+	if code != 0 {
+		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
 	}
 
-	// The error message should be the one console produces when it encounters
-	// an unknown value.
-	got := ui.ErrorWriter.String()
-	want := `Error: Result depends on values that cannot be determined`
-	if !strings.Contains(got, want) {
-		t.Fatalf("wrong output\ngot:\n%s\n\nwant string containing %q", got, want)
+	if got, want := output.String(), "(known after apply)\n"; got != want {
+		t.Fatalf("unexpected output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestConsole_modules(t *testing.T) {
+	td := tempDir(t)
+	copy.CopyDir(testFixturePath("modules"), td)
+	defer os.RemoveAll(td)
+	defer testChdir(t, td)()
+
+	p := applyFixtureProvider()
+	ui := cli.NewMockUi()
+
+	c := &ConsoleCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+		},
+	}
+
+	commands := map[string]string{
+		"module.child.myoutput\n":          "\"bar\"\n",
+		"module.count_child[0].myoutput\n": "\"bar\"\n",
+		"local.foo\n":                      "3\n",
+	}
+
+	args := []string{
+		testFixturePath("modules"),
+	}
+
+	for cmd, val := range commands {
+		var output bytes.Buffer
+		defer testStdinPipe(t, strings.NewReader(cmd))()
+		outCloser := testStdoutCapture(t, &output)
+		code := c.Run(args)
+		outCloser()
+		if code != 0 {
+			t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+		}
+
+		actual := output.String()
+		if output.String() != val {
+			t.Fatalf("bad: %q, expected %q", actual, val)
+		}
 	}
 }

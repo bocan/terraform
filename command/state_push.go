@@ -20,11 +20,7 @@ type StatePushCommand struct {
 }
 
 func (c *StatePushCommand) Run(args []string) int {
-	args, err := c.Meta.process(args, true)
-	if err != nil {
-		return 1
-	}
-
+	args = c.Meta.process(args)
 	var flagForce bool
 	cmdFlags := c.Meta.defaultFlagSet("state push")
 	cmdFlags.BoolVar(&flagForce, "force", false, "")
@@ -76,7 +72,11 @@ func (c *StatePushCommand) Run(args []string) int {
 	}
 
 	// Get the state manager for the currently-selected workspace
-	env := c.Workspace()
+	env, err := c.Workspace()
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
+		return 1
+	}
 	stateMgr, err := b.StateMgr(env)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to load destination state: %s", err))

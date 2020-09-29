@@ -1,6 +1,7 @@
 package getproviders
 
 import (
+	"context"
 	"fmt"
 
 	svchost "github.com/hashicorp/terraform-svchost"
@@ -25,13 +26,13 @@ import (
 // configurations that don't include explicit provider source addresses. New
 // configurations should not rely on it, and this fallback mechanism is
 // likely to be removed altogether in a future Terraform version.
-func LookupLegacyProvider(addr addrs.Provider, source Source) (addrs.Provider, error) {
+func LookupLegacyProvider(ctx context.Context, addr addrs.Provider, source Source) (addrs.Provider, addrs.Provider, error) {
 	if addr.Namespace != "-" {
-		return addr, nil
+		return addr, addrs.Provider{}, nil
 	}
 	if addr.Hostname != defaultRegistryHost { // condition above assures namespace is also "-"
 		// Legacy providers must always belong to the default registry host.
-		return addrs.Provider{}, fmt.Errorf("invalid provider type %q: legacy provider addresses must always belong to %s", addr, defaultRegistryHost)
+		return addrs.Provider{}, addrs.Provider{}, fmt.Errorf("invalid provider type %q: legacy provider addresses must always belong to %s", addr, defaultRegistryHost)
 	}
 
 	// Now we need to derive a suitable *RegistrySource from the given source,
@@ -45,19 +46,28 @@ func LookupLegacyProvider(addr addrs.Provider, source Source) (addrs.Provider, e
 		// based on the CLI configuration, which isn't necessarily true but
 		// is true in all cases where this error message will ultimately be
 		// presented to an end-user, so good enough for now.
-		return addrs.Provider{}, fmt.Errorf("unqualified provider type %q cannot be resolved because direct installation from %s is disabled in the CLI configuration; declare an explicit provider namespace for this provider", addr.Type, addr.Hostname)
+		return addrs.Provider{}, addrs.Provider{}, fmt.Errorf("unqualified provider type %q cannot be resolved because direct installation from %s is disabled in the CLI configuration; declare an explicit provider namespace for this provider", addr.Type, addr.Hostname)
 	}
 
-	defaultNamespace, err := regSource.LookupLegacyProviderNamespace(addr.Hostname, addr.Type)
+	defaultNamespace, redirectNamespace, err := regSource.LookupLegacyProviderNamespace(ctx, addr.Hostname, addr.Type)
 	if err != nil {
-		return addrs.Provider{}, err
+		return addrs.Provider{}, addrs.Provider{}, err
 	}
-
-	return addrs.Provider{
+	provider := addrs.Provider{
 		Hostname:  addr.Hostname,
 		Namespace: defaultNamespace,
 		Type:      addr.Type,
-	}, nil
+	}
+	var redirect addrs.Provider
+	if redirectNamespace != "" {
+		redirect = addrs.Provider{
+			Hostname:  addr.Hostname,
+			Namespace: redirectNamespace,
+			Type:      addr.Type,
+		}
+	}
+
+	return provider, redirect, nil
 }
 
 // findLegacyProviderLookupSource tries to find a *RegistrySource that can talk
@@ -79,6 +89,11 @@ func findLegacyProviderLookupSource(host svchost.Hostname, source Source) *Regis
 		// Easy case: the source is a registry source directly, and so we'll
 		// just use it.
 		return source
+
+	case *MemoizeSource:
+		// Also easy: the source is a memoize wrapper, so defer to its
+		// underlying source.
+		return findLegacyProviderLookupSource(host, source.underlying)
 
 	case MultiSource:
 		// Trickier case: if it's a multisource then we need to scan over

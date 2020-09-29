@@ -23,7 +23,10 @@ func TestUntaint(t *testing.T) {
 				AttrsJSON: []byte(`{"id":"bar"}`),
 				Status:    states.ObjectTainted,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, state)
@@ -46,7 +49,7 @@ func TestUntaint(t *testing.T) {
 	expected := strings.TrimSpace(`
 test_instance.foo:
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 	`)
 	testStateOutput(t, statePath, expected)
 }
@@ -63,7 +66,10 @@ func TestUntaint_lockedState(t *testing.T) {
 				AttrsJSON: []byte(`{"id":"bar"}`),
 				Status:    states.ObjectTainted,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, state)
@@ -136,14 +142,14 @@ func TestUntaint_backup(t *testing.T) {
 	testStateOutput(t, path+".backup", strings.TrimSpace(`
 test_instance.foo: (tainted)
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 	`))
 
 	// State is untainted
 	testStateOutput(t, path, strings.TrimSpace(`
 test_instance.foo:
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 	`))
 }
 
@@ -193,7 +199,7 @@ func TestUntaint_backupDisable(t *testing.T) {
 	testStateOutput(t, path, strings.TrimSpace(`
 test_instance.foo:
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 	`))
 }
 
@@ -255,7 +261,54 @@ func TestUntaint_defaultState(t *testing.T) {
 	testStateOutput(t, path, strings.TrimSpace(`
 test_instance.foo:
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
+	`))
+}
+
+func TestUntaint_defaultWorkspaceState(t *testing.T) {
+	// Get a temp cwd
+	tmp, cwd := testCwd(t)
+	defer testFixCwd(t, tmp, cwd)
+
+	// Write the temp state
+	state := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(
+			addrs.Resource{
+				Mode: addrs.ManagedResourceMode,
+				Type: "test_instance",
+				Name: "foo",
+			}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
+			&states.ResourceInstanceObjectSrc{
+				AttrsJSON: []byte(`{"id":"bar"}`),
+				Status:    states.ObjectTainted,
+			},
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
+		)
+	})
+	testWorkspace := "development"
+	path := testStateFileWorkspaceDefault(t, testWorkspace, state)
+
+	ui := new(cli.MockUi)
+	meta := Meta{Ui: ui}
+	meta.SetWorkspace(testWorkspace)
+	c := &UntaintCommand{
+		Meta: meta,
+	}
+
+	args := []string{
+		"test_instance.foo",
+	}
+	if code := c.Run(args); code != 0 {
+		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+	}
+
+	testStateOutput(t, path, strings.TrimSpace(`
+test_instance.foo:
+  ID = bar
+  provider = provider["registry.terraform.io/-/test"]
 	`))
 }
 
@@ -271,7 +324,10 @@ func TestUntaint_missing(t *testing.T) {
 				AttrsJSON: []byte(`{"id":"bar"}`),
 				Status:    states.ObjectTainted,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, state)
@@ -304,7 +360,10 @@ func TestUntaint_missingAllow(t *testing.T) {
 				AttrsJSON: []byte(`{"id":"bar"}`),
 				Status:    states.ObjectTainted,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, state)
@@ -368,12 +427,12 @@ func TestUntaint_stateOut(t *testing.T) {
 	testStateOutput(t, path, strings.TrimSpace(`
 test_instance.foo: (tainted)
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 	`))
 	testStateOutput(t, "foo", strings.TrimSpace(`
 test_instance.foo:
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 	`))
 }
 
@@ -389,7 +448,10 @@ func TestUntaint_module(t *testing.T) {
 				AttrsJSON: []byte(`{"id":"bar"}`),
 				Status:    states.ObjectTainted,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 		s.SetResourceInstanceCurrent(
 			addrs.Resource{
@@ -401,7 +463,10 @@ func TestUntaint_module(t *testing.T) {
 				AttrsJSON: []byte(`{"id":"bar"}`),
 				Status:    states.ObjectTainted,
 			},
-			addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+			addrs.AbsProviderConfig{
+				Provider: addrs.NewLegacyProvider("test"),
+				Module:   addrs.RootModule,
+			},
 		)
 	})
 	statePath := testStateFile(t, state)
@@ -424,11 +489,11 @@ func TestUntaint_module(t *testing.T) {
 	testStateOutput(t, statePath, strings.TrimSpace(`
 test_instance.foo: (tainted)
   ID = bar
-  provider = provider.test
+  provider = provider["registry.terraform.io/-/test"]
 
 module.child:
   test_instance.blah:
     ID = bar
-    provider = provider.test
+    provider = provider["registry.terraform.io/-/test"]
 	`))
 }

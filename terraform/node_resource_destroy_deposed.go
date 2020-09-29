@@ -33,7 +33,7 @@ type NodePlanDeposedResourceInstanceObject struct {
 
 var (
 	_ GraphNodeDeposedResourceInstanceObject = (*NodePlanDeposedResourceInstanceObject)(nil)
-	_ GraphNodeResource                      = (*NodePlanDeposedResourceInstanceObject)(nil)
+	_ GraphNodeConfigResource                = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeResourceInstance              = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeReferenceable                 = (*NodePlanDeposedResourceInstanceObject)(nil)
 	_ GraphNodeReferencer                    = (*NodePlanDeposedResourceInstanceObject)(nil)
@@ -72,45 +72,6 @@ func (n *NodePlanDeposedResourceInstanceObject) EvalTree() EvalNode {
 	var state *states.ResourceInstanceObject
 
 	seq := &EvalSequence{Nodes: make([]EvalNode, 0, 5)}
-
-	// During the refresh walk we will ensure that our record of the deposed
-	// object is up-to-date. If it was already deleted outside of Terraform
-	// then this will remove it from state and thus avoid us planning a
-	// destroy for it during the subsequent plan walk.
-	seq.Nodes = append(seq.Nodes, &EvalOpFilter{
-		Ops: []walkOperation{walkRefresh},
-		Node: &EvalSequence{
-			Nodes: []EvalNode{
-				&EvalGetProvider{
-					Addr:   n.ResolvedProvider,
-					Output: &provider,
-					Schema: &providerSchema,
-				},
-				&EvalReadStateDeposed{
-					Addr:           addr.Resource,
-					Provider:       &provider,
-					ProviderSchema: &providerSchema,
-					Key:            n.DeposedKey,
-					Output:         &state,
-				},
-				&EvalRefresh{
-					Addr:           addr.Resource,
-					ProviderAddr:   n.ResolvedProvider,
-					Provider:       &provider,
-					ProviderSchema: &providerSchema,
-					State:          &state,
-					Output:         &state,
-				},
-				&EvalWriteStateDeposed{
-					Addr:           addr.Resource,
-					Key:            n.DeposedKey,
-					ProviderAddr:   n.ResolvedProvider,
-					ProviderSchema: &providerSchema,
-					State:          &state,
-				},
-			},
-		},
-	})
 
 	// During the plan walk we always produce a planned destroy change, because
 	// destroying is the only supported action for deposed objects.
@@ -166,7 +127,7 @@ type NodeDestroyDeposedResourceInstanceObject struct {
 
 var (
 	_ GraphNodeDeposedResourceInstanceObject = (*NodeDestroyDeposedResourceInstanceObject)(nil)
-	_ GraphNodeResource                      = (*NodeDestroyDeposedResourceInstanceObject)(nil)
+	_ GraphNodeConfigResource                = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeResourceInstance              = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeDestroyer                     = (*NodeDestroyDeposedResourceInstanceObject)(nil)
 	_ GraphNodeDestroyerCBD                  = (*NodeDestroyDeposedResourceInstanceObject)(nil)

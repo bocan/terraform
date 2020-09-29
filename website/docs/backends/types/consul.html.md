@@ -19,7 +19,7 @@ This backend supports [state locking](/docs/state/locking.html).
 ```hcl
 terraform {
   backend "consul" {
-    address = "demo.consul.io"
+    address = "consul.example.com"
     scheme  = "https"
     path    = "full/path"
   }
@@ -29,7 +29,7 @@ terraform {
 Note that for the access credentials we recommend using a
 [partial configuration](/docs/backends/config.html).
 
-## Example Referencing
+## Data Source Configuration
 
 ```hcl
 data "terraform_remote_state" "foo" {

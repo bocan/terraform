@@ -82,10 +82,9 @@ func TestShow_aliasedProvider(t *testing.T) {
 				// of all of the containing wrapping objects and arrays.
 				AttrsJSON:    []byte("{\n            \"id\": \"bar\"\n          }"),
 				Status:       states.ObjectReady,
-				Dependencies: []addrs.AbsResource{},
-				DependsOn:    []addrs.Referenceable{},
+				Dependencies: []addrs.ConfigResource{},
 			},
-			addrs.RootModuleInstance.ProviderConfigAliased("test", "alias"),
+			addrs.RootModuleInstance.ProviderConfigAliased(addrs.NewDefaultProvider("test"), "alias"),
 		)
 	})
 
@@ -250,22 +249,22 @@ func TestShow_json_output(t *testing.T) {
 
 			expectError := strings.Contains(entry.Name(), "error")
 
+			providerSource, close := newMockProviderSource(t, map[string][]string{
+				"test": []string{"1.2.3"},
+			})
+			defer close()
+
 			p := showFixtureProvider()
 			ui := new(cli.MockUi)
 			m := Meta{
 				testingOverrides: metaOverridesForProvider(p),
 				Ui:               ui,
+				ProviderSource:   providerSource,
 			}
 
 			// init
 			ic := &InitCommand{
 				Meta: m,
-				providerInstaller: &mockProviderInstaller{
-					Providers: map[string][]string{
-						"test": []string{"1.2.3"},
-					},
-					Dir: m.pluginDir(),
-				},
 			}
 			if code := ic.Run([]string{}); code != 0 {
 				if expectError {
@@ -323,9 +322,7 @@ func TestShow_json_output(t *testing.T) {
 			if !cmp.Equal(got, want) {
 				t.Fatalf("wrong result:\n %v\n", cmp.Diff(got, want))
 			}
-
 		})
-
 	}
 }
 
@@ -349,22 +346,22 @@ func TestShow_json_output_state(t *testing.T) {
 			defer os.RemoveAll(td)
 			defer testChdir(t, td)()
 
+			providerSource, close := newMockProviderSource(t, map[string][]string{
+				"test": []string{"1.2.3"},
+			})
+			defer close()
+
 			p := showFixtureProvider()
 			ui := new(cli.MockUi)
 			m := Meta{
 				testingOverrides: metaOverridesForProvider(p),
 				Ui:               ui,
+				ProviderSource:   providerSource,
 			}
 
 			// init
 			ic := &InitCommand{
 				Meta: m,
-				providerInstaller: &mockProviderInstaller{
-					Providers: map[string][]string{
-						"test": []string{"1.2.3"},
-					},
-					Dir: m.pluginDir(),
-				},
 			}
 			if code := ic.Run([]string{}); code != 0 {
 				t.Fatalf("init failed\n%s", ui.ErrorWriter)
@@ -405,9 +402,7 @@ func TestShow_json_output_state(t *testing.T) {
 			if !cmp.Equal(got, want) {
 				t.Fatalf("wrong result:\n %v\n", cmp.Diff(got, want))
 			}
-
 		})
-
 	}
 }
 
@@ -416,6 +411,11 @@ func TestShow_json_output_state(t *testing.T) {
 // named "test".
 func showFixtureSchema() *terraform.ProviderSchema {
 	return &terraform.ProviderSchema{
+		Provider: &configschema.Block{
+			Attributes: map[string]*configschema.Attribute{
+				"region": {Type: cty.String, Optional: true},
+			},
+		},
 		ResourceTypes: map[string]*configschema.Block{
 			"test_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -489,7 +489,10 @@ func showFixturePlanFile(t *testing.T, action plans.Action) string {
 			Type: "test_instance",
 			Name: "foo",
 		}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
-		ProviderAddr: addrs.ProviderConfig{Type: "test"}.Absolute(addrs.RootModuleInstance),
+		ProviderAddr: addrs.AbsProviderConfig{
+			Provider: addrs.NewDefaultProvider("test"),
+			Module:   addrs.RootModule,
+		},
 		ChangeSrc: plans.ChangeSrc{
 			Action: action,
 			Before: priorValRaw,

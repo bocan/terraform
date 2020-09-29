@@ -59,13 +59,25 @@ func (n *EvalCheckPlannedChange) Eval(ctx EvalContext) (interface{}, error) {
 			// all of the unknown values, since the final values might actually
 			// match what was there before after all.
 			log.Printf("[DEBUG] After incorporating new values learned so far during apply, %s change has become NoOp", absAddr)
+
+		case (plannedChange.Action == plans.CreateThenDelete && actualChange.Action == plans.DeleteThenCreate) ||
+			(plannedChange.Action == plans.DeleteThenCreate && actualChange.Action == plans.CreateThenDelete):
+			// If the order of replacement changed, then that is a bug in terraform
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Terraform produced inconsistent final plan",
+				fmt.Sprintf(
+					"When expanding the plan for %s to include new values learned so far during apply, the planned action changed from %s to %s.\n\nThis is a bug in Terraform and should be reported.",
+					absAddr, plannedChange.Action, actualChange.Action,
+				),
+			))
 		default:
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
 				"Provider produced inconsistent final plan",
 				fmt.Sprintf(
 					"When expanding the plan for %s to include new values learned so far during apply, provider %q changed the planned action from %s to %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-					absAddr, n.ProviderAddr.ProviderConfig.Type,
+					absAddr, n.ProviderAddr.Provider.String(),
 					plannedChange.Action, actualChange.Action,
 				),
 			))
@@ -79,7 +91,7 @@ func (n *EvalCheckPlannedChange) Eval(ctx EvalContext) (interface{}, error) {
 			"Provider produced inconsistent final plan",
 			fmt.Sprintf(
 				"When expanding the plan for %s to include new values learned so far during apply, provider %q produced an invalid new value for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-				absAddr, n.ProviderAddr.ProviderConfig.Type, tfdiags.FormatError(err),
+				absAddr, n.ProviderAddr.Provider.String(), tfdiags.FormatError(err),
 			),
 		))
 	}
@@ -93,6 +105,7 @@ type EvalDiff struct {
 	Config         *configs.Resource
 	Provider       *providers.Interface
 	ProviderAddr   addrs.AbsProviderConfig
+	ProviderMetas  map[addrs.Provider]*configs.ProviderMeta
 	ProviderSchema **ProviderSchema
 	State          **states.ResourceInstanceObject
 	PreviousDiff   **plans.ResourceInstanceChange
@@ -104,7 +117,6 @@ type EvalDiff struct {
 	CreateBeforeDestroy bool
 
 	OutputChange **plans.ResourceInstanceChange
-	OutputValue  *cty.Value
 	OutputState  **states.ResourceInstanceObject
 
 	Stub bool
@@ -117,10 +129,16 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 	provider := *n.Provider
 	providerSchema := *n.ProviderSchema
 
+	createBeforeDestroy := n.CreateBeforeDestroy
+	if n.PreviousDiff != nil {
+		// If we already planned the action, we stick to that plan
+		createBeforeDestroy = (*n.PreviousDiff).Action == plans.CreateThenDelete
+	}
+
 	if providerSchema == nil {
 		return nil, fmt.Errorf("provider schema is unavailable for %s", n.Addr)
 	}
-	if n.ProviderAddr.ProviderConfig.Type == "" {
+	if n.ProviderAddr.Provider.Type == "" {
 		panic(fmt.Sprintf("EvalDiff for %s does not have ProviderAddr set", n.Addr.Absolute(ctx.Path())))
 	}
 
@@ -132,12 +150,34 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		// Should be caught during validation, so we don't bother with a pretty error here
 		return nil, fmt.Errorf("provider does not support resource type %q", n.Addr.Resource.Type)
 	}
-	forEach, _ := evaluateResourceForEachExpression(n.Config.ForEach, ctx)
+	forEach, _ := evaluateForEachExpression(n.Config.ForEach, ctx)
 	keyData := EvalDataForInstanceKey(n.Addr.Key, forEach)
-	configVal, _, configDiags := ctx.EvaluateBlock(config.Config, schema, nil, keyData)
+	origConfigVal, _, configDiags := ctx.EvaluateBlock(config.Config, schema, nil, keyData)
 	diags = diags.Append(configDiags)
 	if configDiags.HasErrors() {
 		return nil, diags.Err()
+	}
+
+	metaConfigVal := cty.NullVal(cty.DynamicPseudoType)
+	if n.ProviderMetas != nil {
+		if m, ok := n.ProviderMetas[n.ProviderAddr.Provider]; ok && m != nil {
+			// if the provider doesn't support this feature, throw an error
+			if (*n.ProviderSchema).ProviderMeta == nil {
+				diags = diags.Append(&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  fmt.Sprintf("Provider %s doesn't support provider_meta", n.ProviderAddr.Provider.String()),
+					Detail:   fmt.Sprintf("The resource %s belongs to a provider that doesn't support provider_meta blocks", n.Addr),
+					Subject:  &m.ProviderRange,
+				})
+			} else {
+				var configDiags tfdiags.Diagnostics
+				metaConfigVal, _, configDiags = ctx.EvaluateBlock(m.Config, (*n.ProviderSchema).ProviderMeta, nil, EvalDataForNoInstanceKey)
+				diags = diags.Append(configDiags)
+				if configDiags.HasErrors() {
+					return nil, diags.Err()
+				}
+			}
+		}
 	}
 
 	absAddr := n.Addr.Absolute(ctx.Path())
@@ -161,7 +201,36 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		priorVal = cty.NullVal(schema.ImpliedType())
 	}
 
-	proposedNewVal := objchange.ProposedNewObject(schema, priorVal, configVal)
+	// ignore_changes is meant to only apply to the configuration, so it must
+	// be applied before we generate a plan. This ensures the config used for
+	// the proposed value, the proposed value itself, and the config presented
+	// to the provider in the PlanResourceChange request all agree on the
+	// starting values.
+	configValIgnored, ignoreChangeDiags := n.processIgnoreChanges(priorVal, origConfigVal)
+	diags = diags.Append(ignoreChangeDiags)
+	if ignoreChangeDiags.HasErrors() {
+		return nil, diags.Err()
+	}
+
+	// Create an unmarked version of our config val, defaulting
+	// to the configVal so we don't do the work of unmarking unless
+	// necessary
+	unmarkedConfigVal := configValIgnored
+	var unmarkedPaths []cty.PathValueMarks
+	if configValIgnored.ContainsMarked() {
+		// store the marked values so we can re-mark them later after
+		// we've sent things over the wire.
+		unmarkedConfigVal, unmarkedPaths = configValIgnored.UnmarkDeepWithPaths()
+	}
+
+	unmarkedPriorVal := priorVal
+	if priorVal.ContainsMarked() {
+		// store the marked values so we can re-mark them later after
+		// we've sent things over the wire.
+		unmarkedPriorVal, _ = priorVal.UnmarkDeep()
+	}
+
+	proposedNewVal := objchange.ProposedNewObject(schema, unmarkedPriorVal, unmarkedConfigVal)
 
 	// Call pre-diff hook
 	if !n.Stub {
@@ -180,30 +249,20 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 	validateResp := provider.ValidateResourceTypeConfig(
 		providers.ValidateResourceTypeConfigRequest{
 			TypeName: n.Addr.Resource.Type,
-			Config:   configVal,
+			Config:   unmarkedConfigVal,
 		},
 	)
 	if validateResp.Diagnostics.HasErrors() {
 		return nil, validateResp.Diagnostics.InConfigBody(config.Config).Err()
 	}
 
-	// The provider gets an opportunity to customize the proposed new value,
-	// which in turn produces the _planned_ new value. But before
-	// we send back this information, we need to process ignore_changes
-	// so that CustomizeDiff will not act on them
-	var ignoreChangeDiags tfdiags.Diagnostics
-	proposedNewVal, ignoreChangeDiags = n.processIgnoreChanges(priorVal, proposedNewVal)
-	diags = diags.Append(ignoreChangeDiags)
-	if ignoreChangeDiags.HasErrors() {
-		return nil, diags.Err()
-	}
-
 	resp := provider.PlanResourceChange(providers.PlanResourceChangeRequest{
 		TypeName:         n.Addr.Resource.Type,
-		Config:           configVal,
-		PriorState:       priorVal,
+		Config:           unmarkedConfigVal,
+		PriorState:       unmarkedPriorVal,
 		ProposedNewState: proposedNewVal,
 		PriorPrivate:     priorPrivate,
+		ProviderMeta:     metaConfigVal,
 	})
 	diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config))
 	if diags.HasErrors() {
@@ -220,6 +279,11 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		panic(fmt.Sprintf("PlanResourceChange of %s produced nil value", absAddr.String()))
 	}
 
+	// Add the marks back to the planned new value
+	if len(unmarkedPaths) > 0 {
+		plannedNewVal = plannedNewVal.MarkWithPaths(unmarkedPaths)
+	}
+
 	// We allow the planned new value to disagree with configuration _values_
 	// here, since that allows the provider to do special logic like a
 	// DiffSuppressFunc, but we still require that the provider produces
@@ -230,7 +294,7 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 			"Provider produced invalid plan",
 			fmt.Sprintf(
 				"Provider %q planned an invalid value for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-				n.ProviderAddr.ProviderConfig.Type, tfdiags.FormatErrorPrefixed(err, absAddr.String()),
+				n.ProviderAddr.Provider.String(), tfdiags.FormatErrorPrefixed(err, absAddr.String()),
 			),
 		))
 	}
@@ -238,7 +302,7 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		return nil, diags.Err()
 	}
 
-	if errs := objchange.AssertPlanValid(schema, priorVal, configVal, plannedNewVal); len(errs) > 0 {
+	if errs := objchange.AssertPlanValid(schema, priorVal, configValIgnored, plannedNewVal); len(errs) > 0 {
 		if resp.LegacyTypeSystem {
 			// The shimming of the old type system in the legacy SDK is not precise
 			// enough to pass this consistency check, so we'll give it a pass here,
@@ -246,7 +310,10 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 			// to notice in the logs if an inconsistency beyond the type system
 			// leads to a downstream provider failure.
 			var buf strings.Builder
-			fmt.Fprintf(&buf, "[WARN] Provider %q produced an invalid plan for %s, but we are tolerating it because it is using the legacy plugin SDK.\n    The following problems may be the cause of any confusing errors from downstream operations:", n.ProviderAddr.ProviderConfig.Type, absAddr)
+			fmt.Fprintf(&buf,
+				"[WARN] Provider %q produced an invalid plan for %s, but we are tolerating it because it is using the legacy plugin SDK.\n    The following problems may be the cause of any confusing errors from downstream operations:",
+				n.ProviderAddr.Provider.String(), absAddr,
+			)
 			for _, err := range errs {
 				fmt.Fprintf(&buf, "\n      - %s", tfdiags.FormatError(err))
 			}
@@ -258,22 +325,12 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 					"Provider produced invalid plan",
 					fmt.Sprintf(
 						"Provider %q planned an invalid value for %s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-						n.ProviderAddr.ProviderConfig.Type, tfdiags.FormatErrorPrefixed(err, absAddr.String()),
+						n.ProviderAddr.Provider.String(), tfdiags.FormatErrorPrefixed(err, absAddr.String()),
 					),
 				))
 			}
 			return nil, diags.Err()
 		}
-	}
-
-	// TODO: We should be able to remove this repeat of processing ignored changes
-	// after the plan, which helps providers relying on old behavior "just work"
-	// in the next major version, such that we can be stricter about ignore_changes
-	// values
-	plannedNewVal, ignoreChangeDiags = n.processIgnoreChanges(priorVal, plannedNewVal)
-	diags = diags.Append(ignoreChangeDiags)
-	if ignoreChangeDiags.HasErrors() {
-		return nil, diags.Err()
 	}
 
 	// The provider produces a list of paths to attributes whose changes mean
@@ -291,7 +348,7 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 				continue
 			}
 
-			priorChangedVal, priorPathDiags := hcl.ApplyPath(priorVal, path, nil)
+			priorChangedVal, priorPathDiags := hcl.ApplyPath(unmarkedPriorVal, path, nil)
 			plannedChangedVal, plannedPathDiags := hcl.ApplyPath(plannedNewVal, path, nil)
 			if plannedPathDiags.HasErrors() && priorPathDiags.HasErrors() {
 				// This means the path was invalid in both the prior and new
@@ -301,7 +358,7 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 					"Provider produced invalid plan",
 					fmt.Sprintf(
 						"Provider %q has indicated \"requires replacement\" on %s for a non-existent attribute path %#v.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-						n.ProviderAddr.ProviderConfig.Type, absAddr, path,
+						n.ProviderAddr.Provider.String(), absAddr, path,
 					),
 				))
 				continue
@@ -323,7 +380,10 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 				plannedChangedVal = cty.NullVal(priorChangedVal.Type())
 			}
 
-			eqV := plannedChangedVal.Equals(priorChangedVal)
+			// Unmark for this value for the equality test. If only sensitivity has changed,
+			// this does not require an Update or Replace
+			unmarkedPlannedChangedVal, _ := plannedChangedVal.UnmarkDeep()
+			eqV := unmarkedPlannedChangedVal.Equals(priorChangedVal)
 			if !eqV.IsKnown() || eqV.False() {
 				reqRep.Add(path)
 			}
@@ -333,7 +393,10 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		}
 	}
 
-	eqV := plannedNewVal.Equals(priorVal)
+	// Unmark for this test for equality. If only sensitivity has changed,
+	// this does not require an Update or Replace
+	unmarkedPlannedNewVal, _ := plannedNewVal.UnmarkDeep()
+	eqV := unmarkedPlannedNewVal.Equals(unmarkedPriorVal)
 	eq := eqV.IsKnown() && eqV.True()
 
 	var action plans.Action
@@ -345,7 +408,7 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 	case !reqRep.Empty():
 		// If there are any "requires replace" paths left _after our filtering
 		// above_ then this is a replace action.
-		if n.CreateBeforeDestroy {
+		if createBeforeDestroy {
 			action = plans.CreateThenDelete
 		} else {
 			action = plans.DeleteThenCreate
@@ -370,15 +433,23 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		// able to predict new values for any of these computed attributes.
 		nullPriorVal := cty.NullVal(schema.ImpliedType())
 
+		// Since there is no prior state to compare after replacement, we need
+		// a new unmarked config from our original with no ignored values.
+		unmarkedConfigVal := origConfigVal
+		if origConfigVal.ContainsMarked() {
+			unmarkedConfigVal, _ = origConfigVal.UnmarkDeep()
+		}
+
 		// create a new proposed value from the null state and the config
-		proposedNewVal = objchange.ProposedNewObject(schema, nullPriorVal, configVal)
+		proposedNewVal = objchange.ProposedNewObject(schema, nullPriorVal, unmarkedConfigVal)
 
 		resp = provider.PlanResourceChange(providers.PlanResourceChangeRequest{
 			TypeName:         n.Addr.Resource.Type,
-			Config:           configVal,
+			Config:           unmarkedConfigVal,
 			PriorState:       nullPriorVal,
 			ProposedNewState: proposedNewVal,
 			PriorPrivate:     plannedPrivate,
+			ProviderMeta:     metaConfigVal,
 		})
 		// We need to tread carefully here, since if there are any warnings
 		// in here they probably also came out of our previous call to
@@ -391,13 +462,18 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 		}
 		plannedNewVal = resp.PlannedState
 		plannedPrivate = resp.PlannedPrivate
+
+		if len(unmarkedPaths) > 0 {
+			plannedNewVal = plannedNewVal.MarkWithPaths(unmarkedPaths)
+		}
+
 		for _, err := range plannedNewVal.Type().TestConformance(schema.ImpliedType()) {
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
 				"Provider produced invalid plan",
 				fmt.Sprintf(
 					"Provider %q planned an invalid value for %s%s.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-					n.ProviderAddr.ProviderConfig.Type, absAddr, tfdiags.FormatError(err),
+					n.ProviderAddr.Provider.String(), absAddr, tfdiags.FormatError(err),
 				),
 			))
 		}
@@ -410,7 +486,7 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 	// as a replace change, even though so far we've been treating it as a
 	// create.
 	if action == plans.Create && priorValTainted != cty.NilVal {
-		if n.CreateBeforeDestroy {
+		if createBeforeDestroy {
 			action = plans.CreateThenDelete
 		} else {
 			action = plans.DeleteThenCreate
@@ -452,14 +528,13 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 			Change: plans.Change{
 				Action: action,
 				Before: priorVal,
-				After:  plannedNewVal,
+				// Pass the marked planned value through in our change
+				// to propogate through evaluation.
+				// Marks will be removed when encoding.
+				After: plannedNewVal,
 			},
 			RequiredReplace: reqRep,
 		}
-	}
-
-	if n.OutputValue != nil {
-		*n.OutputValue = configVal
 	}
 
 	// Update the state if we care
@@ -480,32 +555,32 @@ func (n *EvalDiff) Eval(ctx EvalContext) (interface{}, error) {
 	return nil, nil
 }
 
-func (n *EvalDiff) processIgnoreChanges(prior, proposed cty.Value) (cty.Value, tfdiags.Diagnostics) {
+func (n *EvalDiff) processIgnoreChanges(prior, config cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	// ignore_changes only applies when an object already exists, since we
 	// can't ignore changes to a thing we've not created yet.
 	if prior.IsNull() {
-		return proposed, nil
+		return config, nil
 	}
 
 	ignoreChanges := n.Config.Managed.IgnoreChanges
 	ignoreAll := n.Config.Managed.IgnoreAllChanges
 
 	if len(ignoreChanges) == 0 && !ignoreAll {
-		return proposed, nil
+		return config, nil
 	}
 	if ignoreAll {
 		return prior, nil
 	}
-	if prior.IsNull() || proposed.IsNull() {
+	if prior.IsNull() || config.IsNull() {
 		// Ignore changes doesn't apply when we're creating for the first time.
 		// Proposed should never be null here, but if it is then we'll just let it be.
-		return proposed, nil
+		return config, nil
 	}
 
-	return processIgnoreChangesIndividual(prior, proposed, ignoreChanges)
+	return processIgnoreChangesIndividual(prior, config, ignoreChanges)
 }
 
-func processIgnoreChangesIndividual(prior, proposed cty.Value, ignoreChanges []hcl.Traversal) (cty.Value, tfdiags.Diagnostics) {
+func processIgnoreChangesIndividual(prior, config cty.Value, ignoreChanges []hcl.Traversal) (cty.Value, tfdiags.Diagnostics) {
 	// When we walk below we will be using cty.Path values for comparison, so
 	// we'll convert our traversals here so we can compare more easily.
 	ignoreChangesPath := make([]cty.Path, len(ignoreChanges))
@@ -533,7 +608,7 @@ func processIgnoreChangesIndividual(prior, proposed cty.Value, ignoreChanges []h
 	}
 
 	var diags tfdiags.Diagnostics
-	ret, _ := cty.Transform(proposed, func(path cty.Path, v cty.Value) (cty.Value, error) {
+	ret, _ := cty.Transform(config, func(path cty.Path, v cty.Value) (cty.Value, error) {
 		// First we must see if this is a path that's being ignored at all.
 		// We're looking for an exact match here because this walk will visit
 		// leaf values first and then their containers, and we want to do
@@ -603,7 +678,7 @@ func (n *EvalDiffDestroy) Eval(ctx EvalContext) (interface{}, error) {
 	absAddr := n.Addr.Absolute(ctx.Path())
 	state := *n.State
 
-	if n.ProviderAddr.ProviderConfig.Type == "" {
+	if n.ProviderAddr.Provider.Type == "" {
 		if n.DeposedKey == "" {
 			panic(fmt.Sprintf("EvalDiffDestroy for %s does not have ProviderAddr set", absAddr))
 		} else {
