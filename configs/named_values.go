@@ -5,13 +5,13 @@ import (
 	"unicode"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 
 	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/internal/typeexpr"
 )
 
 // A consistent detail message for all "not a valid identifier" diagnostics.
@@ -28,6 +28,7 @@ type Variable struct {
 	Sensitive   bool
 
 	DescriptionSet bool
+	SensitiveSet   bool
 
 	DeclRange hcl.Range
 }
@@ -98,6 +99,7 @@ func decodeVariableBlock(block *hcl.Block, override bool) (*Variable, hcl.Diagno
 	if attr, exists := content.Attributes["sensitive"]; exists {
 		valDiags := gohcl.DecodeExpression(attr.Expr, nil, &v.Sensitive)
 		diags = append(diags, valDiags...)
+		v.SensitiveSet = true
 	}
 
 	if attr, exists := content.Attributes["default"]; exists {

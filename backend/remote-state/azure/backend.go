@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform/internal/legacy/helper/schema"
 )
 
 // New creates a new backend for Azure remote state.
@@ -239,7 +239,7 @@ func (b *Backend) configure(ctx context.Context) error {
 		UseMsi:                        data.Get("use_msi").(bool),
 	}
 
-	armClient, err := buildArmClient(config)
+	armClient, err := buildArmClient(context.TODO(), config)
 	if err != nil {
 		return err
 	}

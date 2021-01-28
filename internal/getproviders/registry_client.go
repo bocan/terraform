@@ -21,8 +21,8 @@ import (
 	svcauth "github.com/hashicorp/terraform-svchost/auth"
 
 	"github.com/hashicorp/terraform/addrs"
-	"github.com/hashicorp/terraform/helper/logging"
 	"github.com/hashicorp/terraform/httpclient"
+	"github.com/hashicorp/terraform/internal/logging"
 	"github.com/hashicorp/terraform/version"
 )
 
@@ -77,12 +77,7 @@ func newRegistryClient(baseURL *url.URL, creds svcauth.HostCredentials) *registr
 	retryableClient.RequestLogHook = requestLogHook
 	retryableClient.ErrorHandler = maxRetryErrorHandler
 
-	logOutput, err := logging.LogOutput()
-	if err != nil {
-		log.Printf("[WARN] Failed to set up registry client logger, "+
-			"continuing without client logging: %s", err)
-	}
-	retryableClient.Logger = log.New(logOutput, "", log.Flags())
+	retryableClient.Logger = log.New(logging.LogOutput(), "", log.Flags())
 
 	return &registryClient{
 		baseURL:    baseURL,
@@ -266,7 +261,7 @@ func (c *registryClient) PackageMeta(ctx context.Context, provider addrs.Provide
 				match = true
 			}
 		}
-		if match == false {
+		if !match {
 			// If the protocol version is not supported, try to find the closest
 			// matching version.
 			closest, err := c.findClosestProtocolCompatibleVersion(ctx, provider, version)
@@ -406,87 +401,6 @@ FindMatch:
 		}
 	}
 	return match, nil
-}
-
-// LegacyProviderDefaultNamespace returns the raw address strings produced by
-// the registry when asked about the given unqualified provider type name.
-// The returned namespace string is taken verbatim from the registry's response.
-//
-// This method exists only to allow compatibility with unqualified names
-// in older configurations. New configurations should be written so as not to
-// depend on it.
-func (c *registryClient) LegacyProviderDefaultNamespace(ctx context.Context, typeName string) (string, string, error) {
-	endpointPath, err := url.Parse(path.Join("-", typeName, "versions"))
-	if err != nil {
-		// Should never happen because we're constructing this from
-		// already-validated components.
-		return "", "", err
-	}
-	endpointURL := c.baseURL.ResolveReference(endpointPath)
-
-	req, err := retryablehttp.NewRequest("GET", endpointURL.String(), nil)
-	if err != nil {
-		return "", "", err
-	}
-	req = req.WithContext(ctx)
-	c.addHeadersToRequest(req.Request)
-
-	// This is just to give us something to return in error messages. It's
-	// not a proper provider address.
-	placeholderProviderAddr := addrs.NewLegacyProvider(typeName)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", "", c.errQueryFailed(placeholderProviderAddr, err)
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		// Great!
-	case http.StatusNotFound:
-		return "", "", ErrProviderNotFound{
-			Provider: placeholderProviderAddr,
-		}
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return "", "", c.errUnauthorized(placeholderProviderAddr.Hostname)
-	default:
-		return "", "", c.errQueryFailed(placeholderProviderAddr, errors.New(resp.Status))
-	}
-
-	type ResponseBody struct {
-		Id      string `json:"id"`
-		MovedTo string `json:"moved_to"`
-	}
-	var body ResponseBody
-
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&body); err != nil {
-		return "", "", c.errQueryFailed(placeholderProviderAddr, err)
-	}
-
-	provider, diags := addrs.ParseProviderSourceString(body.Id)
-	if diags.HasErrors() {
-		return "", "", fmt.Errorf("Error parsing provider ID from Registry: %s", diags.Err())
-	}
-
-	if provider.Type != typeName {
-		return "", "", fmt.Errorf("Registry returned provider with type %q, expected %q", provider.Type, typeName)
-	}
-
-	var movedTo addrs.Provider
-	if body.MovedTo != "" {
-		movedTo, diags = addrs.ParseProviderSourceString(body.MovedTo)
-		if diags.HasErrors() {
-			return "", "", fmt.Errorf("Error parsing provider ID from Registry: %s", diags.Err())
-		}
-
-		if movedTo.Type != typeName {
-			return "", "", fmt.Errorf("Registry returned provider with type %q, expected %q", movedTo.Type, typeName)
-		}
-	}
-
-	return provider.Namespace, movedTo.Namespace, nil
 }
 
 func (c *registryClient) addHeadersToRequest(req *http.Request) {

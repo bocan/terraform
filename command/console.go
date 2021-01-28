@@ -7,7 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/backend"
-	"github.com/hashicorp/terraform/helper/wrappedstreams"
+	"github.com/hashicorp/terraform/internal/helper/wrappedstreams"
 	"github.com/hashicorp/terraform/repl"
 	"github.com/hashicorp/terraform/tfdiags"
 
@@ -35,6 +35,7 @@ func (c *ConsoleCommand) Run(args []string) int {
 		c.Ui.Error(err.Error())
 		return 1
 	}
+	configPath = c.Meta.normalizePath(configPath)
 
 	// Check for user-supplied plugin path
 	if c.pluginPath, err = c.loadPluginPath(); err != nil {
@@ -68,6 +69,9 @@ func (c *ConsoleCommand) Run(args []string) int {
 		c.Ui.Error(ErrUnsupportedLocalOp)
 		return 1
 	}
+
+	// This is a read-only command
+	c.ignoreRemoteBackendVersionConflict(b)
 
 	// Build the operation
 	opReq := c.Operation(b)
@@ -106,7 +110,7 @@ func (c *ConsoleCommand) Run(args []string) int {
 		}
 	}()
 
-	// Setup the UI so we can output directly to stdout
+	// Set up the UI so we can output directly to stdout
 	ui := &cli.BasicUi{
 		Writer:      wrappedstreams.Stdout(),
 		ErrorWriter: wrappedstreams.Stderr(),
@@ -203,5 +207,5 @@ Options:
 }
 
 func (c *ConsoleCommand) Synopsis() string {
-	return "Interactive console for Terraform interpolations"
+	return "Try Terraform expressions at an interactive command prompt"
 }

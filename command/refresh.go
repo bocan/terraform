@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/backend"
 	"github.com/hashicorp/terraform/tfdiags"
 )
@@ -96,7 +95,7 @@ func (c *RefreshCommand) Run(args []string) int {
 		return op.Result.ExitStatus()
 	}
 
-	if outputs := outputsAsString(op.State, addrs.RootModuleInstance, true); outputs != "" {
+	if outputs := outputsAsString(op.State, true); outputs != "" {
 		c.Ui.Output(c.Colorize().Color(outputs))
 	}
 
@@ -154,5 +153,5 @@ Options:
 }
 
 func (c *RefreshCommand) Synopsis() string {
-	return "Update local state file against real resources"
+	return "Update the state to match remote systems"
 }

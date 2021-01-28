@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,12 +20,11 @@ import (
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/helper/copy"
+	"github.com/hashicorp/terraform/internal/depsfile"
 	"github.com/hashicorp/terraform/internal/getproviders"
 	"github.com/hashicorp/terraform/internal/providercache"
 	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/states/statemgr"
-	"github.com/hashicorp/terraform/terraform"
 )
 
 func TestInit_empty(t *testing.T) {
@@ -185,7 +185,7 @@ func TestInit_fromModule_dstInSrc(t *testing.T) {
 func TestInit_get(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get"), td)
+	testCopyDir(t, testFixturePath("init-get"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -226,7 +226,6 @@ func TestInit_getUpgradeModules(t *testing.T) {
 
 	args := []string{
 		"-get=true",
-		"-get-plugins=false",
 		"-upgrade",
 		testFixturePath("init-get"),
 	}
@@ -244,7 +243,7 @@ func TestInit_getUpgradeModules(t *testing.T) {
 func TestInit_backend(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend"), td)
+	testCopyDir(t, testFixturePath("init-backend"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -269,7 +268,7 @@ func TestInit_backend(t *testing.T) {
 func TestInit_backendUnset(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend"), td)
+	testCopyDir(t, testFixturePath("init-backend"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -332,7 +331,7 @@ func TestInit_backendUnset(t *testing.T) {
 func TestInit_backendConfigFile(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend-config-file"), td)
+	testCopyDir(t, testFixturePath("init-backend-config-file"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -459,7 +458,7 @@ func TestInit_backendConfigFile(t *testing.T) {
 func TestInit_backendConfigFilePowershellConfusion(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend-config-file"), td)
+	testCopyDir(t, testFixturePath("init-backend-config-file"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -493,7 +492,7 @@ func TestInit_backendConfigFilePowershellConfusion(t *testing.T) {
 func TestInit_backendConfigFileChange(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend-config-file-change"), td)
+	testCopyDir(t, testFixturePath("init-backend-config-file-change"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -525,7 +524,7 @@ func TestInit_backendConfigFileChange(t *testing.T) {
 func TestInit_backendConfigKV(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend-config-kv"), td)
+	testCopyDir(t, testFixturePath("init-backend-config-kv"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -552,7 +551,7 @@ func TestInit_backendConfigKV(t *testing.T) {
 func TestInit_backendConfigKVReInit(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend-config-kv"), td)
+	testCopyDir(t, testFixturePath("init-backend-config-kv"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -613,7 +612,7 @@ func TestInit_backendConfigKVReInit(t *testing.T) {
 func TestInit_backendConfigKVReInitWithConfigDiff(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend"), td)
+	testCopyDir(t, testFixturePath("init-backend"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -659,7 +658,7 @@ func TestInit_backendConfigKVReInitWithConfigDiff(t *testing.T) {
 func TestInit_backendCli_no_config_block(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init"), td)
+	testCopyDir(t, testFixturePath("init"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -690,7 +689,7 @@ func TestInit_targetSubdir(t *testing.T) {
 	defer testChdir(t, td)()
 
 	// copy the source into a subdir
-	copy.CopyDir(testFixturePath("init-backend"), filepath.Join(td, "source"))
+	testCopyDir(t, testFixturePath("init-backend"), filepath.Join(td, "source"))
 
 	ui := new(cli.MockUi)
 	c := &InitCommand{
@@ -719,7 +718,7 @@ func TestInit_targetSubdir(t *testing.T) {
 
 func TestInit_backendReinitWithExtra(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend-empty"), td)
+	testCopyDir(t, testFixturePath("init-backend-empty"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -775,7 +774,7 @@ func TestInit_backendReinitWithExtra(t *testing.T) {
 // move option from config to -backend-config args
 func TestInit_backendReinitConfigToExtra(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend"), td)
+	testCopyDir(t, testFixturePath("init-backend"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -831,7 +830,7 @@ func TestInit_backendReinitConfigToExtra(t *testing.T) {
 // make sure inputFalse stops execution on migrate
 func TestInit_inputFalse(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-backend"), td)
+	testCopyDir(t, testFixturePath("init-backend"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -844,7 +843,7 @@ func TestInit_inputFalse(t *testing.T) {
 	}
 
 	args := []string{"-input=false", "-backend-config=path=foo"}
-	if code := c.Run([]string{"-input=false"}); code != 0 {
+	if code := c.Run(args); code != 0 {
 		t.Fatalf("bad: \n%s", ui.ErrorWriter)
 	}
 
@@ -906,7 +905,7 @@ func TestInit_inputFalse(t *testing.T) {
 func TestInit_getProvider(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-providers"), td)
+	testCopyDir(t, testFixturePath("init-get-providers"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -939,15 +938,15 @@ func TestInit_getProvider(t *testing.T) {
 	}
 
 	// check that we got the providers for our config
-	exactPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/hashicorp/exact/1.2.3/%s", getproviders.CurrentPlatform)
+	exactPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/hashicorp/exact/1.2.3/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(exactPath); os.IsNotExist(err) {
 		t.Fatal("provider 'exact' not downloaded")
 	}
-	greaterThanPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/hashicorp/greater-than/2.3.4/%s", getproviders.CurrentPlatform)
+	greaterThanPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/hashicorp/greater-than/2.3.4/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(greaterThanPath); os.IsNotExist(err) {
 		t.Fatal("provider 'greater-than' not downloaded")
 	}
-	betweenPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/hashicorp/between/2.3.4/%s", getproviders.CurrentPlatform)
+	betweenPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/hashicorp/between/2.3.4/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(betweenPath); os.IsNotExist(err) {
 		t.Fatal("provider 'between' not downloaded")
 	}
@@ -956,9 +955,37 @@ func TestInit_getProvider(t *testing.T) {
 		// getting providers should fail if a state from a newer version of
 		// terraform exists, since InitCommand.getProviders needs to inspect that
 		// state.
-		s := terraform.NewState()
-		s.TFVersion = "100.1.0"
-		testStateFileDefault(t, s)
+
+		f, err := os.Create(DefaultStateFilename)
+		if err != nil {
+			t.Fatalf("err: %s", err)
+		}
+		defer f.Close()
+
+		// Construct a mock state file from the far future
+		type FutureState struct {
+			Version          uint                     `json:"version"`
+			Lineage          string                   `json:"lineage"`
+			TerraformVersion string                   `json:"terraform_version"`
+			Outputs          map[string]interface{}   `json:"outputs"`
+			Resources        []map[string]interface{} `json:"resources"`
+		}
+		fs := &FutureState{
+			Version:          999,
+			Lineage:          "123-456-789",
+			TerraformVersion: "999.0.0",
+			Outputs:          make(map[string]interface{}),
+			Resources:        make([]map[string]interface{}, 0),
+		}
+		src, err := json.MarshalIndent(fs, "", "  ")
+		if err != nil {
+			t.Fatalf("failed to marshal future state: %s", err)
+		}
+		src = append(src, '\n')
+		_, err = f.Write(src)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		ui := new(cli.MockUi)
 		m.Ui = ui
@@ -971,7 +998,7 @@ func TestInit_getProvider(t *testing.T) {
 		}
 
 		errMsg := ui.ErrorWriter.String()
-		if !strings.Contains(errMsg, "which is newer than current") {
+		if !strings.Contains(errMsg, "Unsupported state file format") {
 			t.Fatal("unexpected error:", errMsg)
 		}
 	})
@@ -980,7 +1007,7 @@ func TestInit_getProvider(t *testing.T) {
 func TestInit_getProviderSource(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-provider-source"), td)
+	testCopyDir(t, testFixturePath("init-get-provider-source"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1012,24 +1039,24 @@ func TestInit_getProviderSource(t *testing.T) {
 	}
 
 	// check that we got the providers for our config
-	exactPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/acme/alpha/1.2.3/%s", getproviders.CurrentPlatform)
+	exactPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/acme/alpha/1.2.3/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(exactPath); os.IsNotExist(err) {
-		t.Fatal("provider 'alpha' not downloaded")
+		t.Error("provider 'alpha' not downloaded")
 	}
-	greaterThanPath := fmt.Sprintf(".terraform/plugins/registry.example.com/acme/beta/1.0.0/%s", getproviders.CurrentPlatform)
+	greaterThanPath := fmt.Sprintf(".terraform/providers/registry.example.com/acme/beta/1.0.0/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(greaterThanPath); os.IsNotExist(err) {
-		t.Fatal("provider 'beta' not downloaded")
+		t.Error("provider 'beta' not downloaded")
 	}
-	betweenPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/hashicorp/gamma/2.0.0/%s", getproviders.CurrentPlatform)
+	betweenPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/hashicorp/gamma/2.0.0/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(betweenPath); os.IsNotExist(err) {
-		t.Fatal("provider 'gamma' not downloaded")
+		t.Error("provider 'gamma' not downloaded")
 	}
 }
 
 func TestInit_getProviderLegacyFromState(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-provider-legacy-from-state"), td)
+	testCopyDir(t, testFixturePath("init-get-provider-legacy-from-state"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1055,8 +1082,8 @@ func TestInit_getProviderLegacyFromState(t *testing.T) {
 
 	// Expect this diagnostic output
 	wants := []string{
-		"Found unresolvable legacy provider references in state",
-		"terraform state replace-provider registry.terraform.io/-/alpha registry.terraform.io/acme/alpha",
+		"Invalid legacy provider address",
+		"You must complete the Terraform 0.13 upgrade process",
 	}
 	got := ui.ErrorWriter.String()
 	for _, want := range wants {
@@ -1064,18 +1091,12 @@ func TestInit_getProviderLegacyFromState(t *testing.T) {
 			t.Fatalf("expected output to contain %q, got:\n\n%s", want, got)
 		}
 	}
-
-	// Should still install the alpha provider
-	exactPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/acme/alpha/1.2.3/%s", getproviders.CurrentPlatform)
-	if _, err := os.Stat(exactPath); os.IsNotExist(err) {
-		t.Fatal("provider 'alpha' not downloaded")
-	}
 }
 
 func TestInit_getProviderInvalidPackage(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-provider-invalid-package"), td)
+	testCopyDir(t, testFixturePath("init-get-provider-invalid-package"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1116,19 +1137,19 @@ func TestInit_getProviderInvalidPackage(t *testing.T) {
 	}
 
 	// invalid provider should be installed
-	packagePath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/invalid/package/1.0.0/%s/terraform-package", getproviders.CurrentPlatform)
+	packagePath := fmt.Sprintf(".terraform/providers/registry.terraform.io/invalid/package/1.0.0/%s/terraform-package", getproviders.CurrentPlatform)
 	if _, err := os.Stat(packagePath); os.IsNotExist(err) {
 		t.Fatal("provider 'invalid/package' not downloaded")
 	}
 
 	wantErrors := []string{
-		"Failed to validate installed provider",
+		"Failed to install provider",
 		"could not find executable file starting with terraform-provider-package",
 	}
 	got := ui.ErrorWriter.String()
 	for _, wantError := range wantErrors {
 		if !strings.Contains(got, wantError) {
-			t.Fatalf("missing error:\nwant: %q\n got: %q", wantError, got)
+			t.Fatalf("missing error:\nwant: %q\ngot:\n%s", wantError, got)
 		}
 	}
 }
@@ -1136,7 +1157,7 @@ func TestInit_getProviderInvalidPackage(t *testing.T) {
 func TestInit_getProviderDetectedLegacy(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-provider-detected-legacy"), td)
+	testCopyDir(t, testFixturePath("init-get-provider-detected-legacy"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1174,12 +1195,12 @@ func TestInit_getProviderDetectedLegacy(t *testing.T) {
 	}
 
 	// foo should be installed
-	fooPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/hashicorp/foo/1.2.3/%s", getproviders.CurrentPlatform)
+	fooPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/hashicorp/foo/1.2.3/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(fooPath); os.IsNotExist(err) {
 		t.Error("provider 'foo' not installed")
 	}
 	// baz should not be installed
-	bazPath := fmt.Sprintf(".terraform/plugins/registry.terraform.io/terraform-providers/baz/2.3.4/%s", getproviders.CurrentPlatform)
+	bazPath := fmt.Sprintf(".terraform/providers/registry.terraform.io/terraform-providers/baz/2.3.4/%s", getproviders.CurrentPlatform)
 	if _, err := os.Stat(bazPath); !os.IsNotExist(err) {
 		t.Error("provider 'baz' installed, but should not be")
 	}
@@ -1187,13 +1208,10 @@ func TestInit_getProviderDetectedLegacy(t *testing.T) {
 	// error output is the main focus of this test
 	errOutput := ui.ErrorWriter.String()
 	errors := []string{
-		"Error while installing hashicorp/frob:",
-		"Could not find required providers, but found possible alternatives",
-		"hashicorp/baz -> terraform-providers/baz",
-		"terraform 0.13upgrade .",
-		"terraform 0.13upgrade child",
-		"The following remote modules must also be upgraded",
-		"- module.dicerolls at acme/bar/random",
+		"Failed to query available provider packages",
+		"Could not retrieve the list of available versions",
+		"registry.terraform.io/hashicorp/baz",
+		"registry.terraform.io/hashicorp/frob",
 	}
 	for _, want := range errors {
 		if !strings.Contains(errOutput, want) {
@@ -1206,7 +1224,7 @@ func TestInit_providerSource(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
 	configDirName := "init-required-providers"
-	copy.CopyDir(testFixturePath(configDirName), filepath.Join(td, configDirName))
+	testCopyDir(t, testFixturePath(configDirName), filepath.Join(td, configDirName))
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1266,29 +1284,38 @@ func TestInit_providerSource(t *testing.T) {
 		t.Errorf("wrong cache directory contents after upgrade\n%s", diff)
 	}
 
-	inst := m.providerInstaller()
-	gotSelected, err := inst.SelectedPackages()
+	locks, err := m.lockedDependencies()
 	if err != nil {
-		t.Fatalf("failed to get selected packages from installer: %s", err)
+		t.Fatalf("failed to get locked dependencies: %s", err)
 	}
-	wantSelected := map[addrs.Provider]*providercache.CachedProvider{
-		addrs.NewDefaultProvider("test-beta"): {
-			Provider:   addrs.NewDefaultProvider("test-beta"),
-			Version:    getproviders.MustParseVersion("1.2.4"),
-			PackageDir: expectedPackageInstallPath("test-beta", "1.2.4", false),
-		},
-		addrs.NewDefaultProvider("test"): {
-			Provider:   addrs.NewDefaultProvider("test"),
-			Version:    getproviders.MustParseVersion("1.2.3"),
-			PackageDir: expectedPackageInstallPath("test", "1.2.3", false),
-		},
-		addrs.NewDefaultProvider("source"): {
-			Provider:   addrs.NewDefaultProvider("source"),
-			Version:    getproviders.MustParseVersion("1.2.3"),
-			PackageDir: expectedPackageInstallPath("source", "1.2.3", false),
-		},
+	gotProviderLocks := locks.AllProviders()
+	wantProviderLocks := map[addrs.Provider]*depsfile.ProviderLock{
+		addrs.NewDefaultProvider("test-beta"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("test-beta"),
+			getproviders.MustParseVersion("1.2.4"),
+			getproviders.MustParseVersionConstraints("= 1.2.4"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("see6W06w09Ea+AobFJ+mbvPTie6ASqZAAdlFZbs8BSM="),
+			},
+		),
+		addrs.NewDefaultProvider("test"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("test"),
+			getproviders.MustParseVersion("1.2.3"),
+			getproviders.MustParseVersionConstraints("= 1.2.3"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("wlbEC2mChQZ2hhgUhl6SeVLPP7fMqOFUZAQhQ9GIIno="),
+			},
+		),
+		addrs.NewDefaultProvider("source"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("source"),
+			getproviders.MustParseVersion("1.2.3"),
+			getproviders.MustParseVersionConstraints("= 1.2.3"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("myS3qb3px3tRBq1ZWRYJeUH+kySWpBc0Yy8rw6W7/p4="),
+			},
+		),
 	}
-	if diff := cmp.Diff(wantSelected, gotSelected); diff != "" {
+	if diff := cmp.Diff(gotProviderLocks, wantProviderLocks, depsfile.ProviderLockComparer); diff != "" {
 		t.Errorf("wrong version selections after upgrade\n%s", diff)
 	}
 
@@ -1304,7 +1331,7 @@ func TestInit_cancel(t *testing.T) {
 
 	td := tempDir(t)
 	configDirName := "init-required-providers"
-	copy.CopyDir(testFixturePath(configDirName), filepath.Join(td, configDirName))
+	testCopyDir(t, testFixturePath(configDirName), filepath.Join(td, configDirName))
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1349,7 +1376,7 @@ func TestInit_cancel(t *testing.T) {
 func TestInit_getUpgradePlugins(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-providers"), td)
+	testCopyDir(t, testFixturePath("init-get-providers"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1434,38 +1461,46 @@ func TestInit_getUpgradePlugins(t *testing.T) {
 		t.Errorf("wrong cache directory contents after upgrade\n%s", diff)
 	}
 
-	inst := m.providerInstaller()
-	gotSelected, err := inst.SelectedPackages()
+	locks, err := m.lockedDependencies()
 	if err != nil {
-		t.Fatalf("failed to get selected packages from installer: %s", err)
+		t.Fatalf("failed to get locked dependencies: %s", err)
 	}
-	wantSelected := map[addrs.Provider]*providercache.CachedProvider{
-		addrs.NewDefaultProvider("between"): {
-			Provider:   addrs.NewDefaultProvider("between"),
-			Version:    getproviders.MustParseVersion("2.3.4"),
-			PackageDir: expectedPackageInstallPath("between", "2.3.4", false),
-		},
-		addrs.NewDefaultProvider("exact"): {
-			Provider:   addrs.NewDefaultProvider("exact"),
-			Version:    getproviders.MustParseVersion("1.2.3"),
-			PackageDir: expectedPackageInstallPath("exact", "1.2.3", false),
-		},
-		addrs.NewDefaultProvider("greater-than"): {
-			Provider:   addrs.NewDefaultProvider("greater-than"),
-			Version:    getproviders.MustParseVersion("2.3.4"),
-			PackageDir: expectedPackageInstallPath("greater-than", "2.3.4", false),
-		},
+	gotProviderLocks := locks.AllProviders()
+	wantProviderLocks := map[addrs.Provider]*depsfile.ProviderLock{
+		addrs.NewDefaultProvider("between"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("between"),
+			getproviders.MustParseVersion("2.3.4"),
+			getproviders.MustParseVersionConstraints("> 1.0.0, < 3.0.0"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("JVqAvZz88A+hS2wHVtTWQkHaxoA/LrUAz0H3jPBWPIA="),
+			},
+		),
+		addrs.NewDefaultProvider("exact"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("exact"),
+			getproviders.MustParseVersion("1.2.3"),
+			getproviders.MustParseVersionConstraints("= 1.2.3"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("H1TxWF8LyhBb6B4iUdKhLc/S9sC/jdcrCykpkbGcfbg="),
+			},
+		),
+		addrs.NewDefaultProvider("greater-than"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("greater-than"),
+			getproviders.MustParseVersion("2.3.4"),
+			getproviders.MustParseVersionConstraints(">= 2.3.3"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("SJPpXx/yoFE/W+7eCipjJ+G21xbdnTBD7lWodZ8hWkU="),
+			},
+		),
 	}
-	if diff := cmp.Diff(wantSelected, gotSelected); diff != "" {
+	if diff := cmp.Diff(gotProviderLocks, wantProviderLocks, depsfile.ProviderLockComparer); diff != "" {
 		t.Errorf("wrong version selections after upgrade\n%s", diff)
 	}
-
 }
 
 func TestInit_getProviderMissing(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-providers"), td)
+	testCopyDir(t, testFixturePath("init-get-providers"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1503,7 +1538,7 @@ func TestInit_getProviderMissing(t *testing.T) {
 func TestInit_checkRequiredVersion(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-check-required-version"), td)
+	testCopyDir(t, testFixturePath("init-check-required-version"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1531,12 +1566,12 @@ func TestInit_checkRequiredVersion(t *testing.T) {
 func TestInit_providerLockFile(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-provider-lock-file"), td)
+	testCopyDir(t, testFixturePath("init-provider-lock-file"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
 	providerSource, close := newMockProviderSource(t, map[string][]string{
-		"test": []string{"1.2.3"},
+		"test": {"1.2.3"},
 	})
 	defer close()
 
@@ -1556,23 +1591,28 @@ func TestInit_providerLockFile(t *testing.T) {
 		t.Fatalf("bad: \n%s", ui.ErrorWriter.String())
 	}
 
-	selectionsFile := ".terraform/plugins/selections.json"
-	buf, err := ioutil.ReadFile(selectionsFile)
+	lockFile := ".terraform.lock.hcl"
+	buf, err := ioutil.ReadFile(lockFile)
 	if err != nil {
-		t.Fatalf("failed to read provider selections file %s: %s", selectionsFile, err)
+		t.Fatalf("failed to read dependency lock file %s: %s", lockFile, err)
 	}
+	buf = bytes.TrimSpace(buf)
 	// The hash in here is for the fake package that newMockProviderSource produces
 	// (so it'll change if newMockProviderSource starts producing different contents)
 	wantLockFile := strings.TrimSpace(`
-{
-  "registry.terraform.io/hashicorp/test": {
-    "hash": "h1:wlbEC2mChQZ2hhgUhl6SeVLPP7fMqOFUZAQhQ9GIIno=",
-    "version": "1.2.3"
-  }
+# This file is maintained automatically by "terraform init".
+# Manual edits may be lost in future updates.
+
+provider "registry.terraform.io/hashicorp/test" {
+  version     = "1.2.3"
+  constraints = "1.2.3"
+  hashes = [
+    "h1:wlbEC2mChQZ2hhgUhl6SeVLPP7fMqOFUZAQhQ9GIIno=",
+  ]
 }
 `)
-	if string(buf) != wantLockFile {
-		t.Errorf("wrong provider selections file contents\ngot:  %s\nwant: %s", buf, wantLockFile)
+	if diff := cmp.Diff(wantLockFile, string(buf)); diff != "" {
+		t.Errorf("wrong dependency lock file contents\n%s", diff)
 	}
 }
 
@@ -1645,7 +1685,7 @@ func TestInit_pluginDirReset(t *testing.T) {
 // Test user-supplied -plugin-dir
 func TestInit_pluginDirProviders(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-providers"), td)
+	testCopyDir(t, testFixturePath("init-get-providers"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1696,29 +1736,38 @@ func TestInit_pluginDirProviders(t *testing.T) {
 		t.Fatalf("bad: \n%s", ui.ErrorWriter)
 	}
 
-	inst := m.providerInstaller()
-	gotSelected, err := inst.SelectedPackages()
+	locks, err := m.lockedDependencies()
 	if err != nil {
-		t.Fatalf("failed to get selected packages from installer: %s", err)
+		t.Fatalf("failed to get locked dependencies: %s", err)
 	}
-	wantSelected := map[addrs.Provider]*providercache.CachedProvider{
-		addrs.NewDefaultProvider("between"): {
-			Provider:   addrs.NewDefaultProvider("between"),
-			Version:    getproviders.MustParseVersion("2.3.4"),
-			PackageDir: expectedPackageInstallPath("between", "2.3.4", false),
-		},
-		addrs.NewDefaultProvider("exact"): {
-			Provider:   addrs.NewDefaultProvider("exact"),
-			Version:    getproviders.MustParseVersion("1.2.3"),
-			PackageDir: expectedPackageInstallPath("exact", "1.2.3", false),
-		},
-		addrs.NewDefaultProvider("greater-than"): {
-			Provider:   addrs.NewDefaultProvider("greater-than"),
-			Version:    getproviders.MustParseVersion("2.3.4"),
-			PackageDir: expectedPackageInstallPath("greater-than", "2.3.4", false),
-		},
+	gotProviderLocks := locks.AllProviders()
+	wantProviderLocks := map[addrs.Provider]*depsfile.ProviderLock{
+		addrs.NewDefaultProvider("between"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("between"),
+			getproviders.MustParseVersion("2.3.4"),
+			getproviders.MustParseVersionConstraints("> 1.0.0, < 3.0.0"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("JVqAvZz88A+hS2wHVtTWQkHaxoA/LrUAz0H3jPBWPIA="),
+			},
+		),
+		addrs.NewDefaultProvider("exact"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("exact"),
+			getproviders.MustParseVersion("1.2.3"),
+			getproviders.MustParseVersionConstraints("= 1.2.3"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("H1TxWF8LyhBb6B4iUdKhLc/S9sC/jdcrCykpkbGcfbg="),
+			},
+		),
+		addrs.NewDefaultProvider("greater-than"): depsfile.NewProviderLock(
+			addrs.NewDefaultProvider("greater-than"),
+			getproviders.MustParseVersion("2.3.4"),
+			getproviders.MustParseVersionConstraints(">= 2.3.3"),
+			[]getproviders.Hash{
+				getproviders.HashScheme1.New("SJPpXx/yoFE/W+7eCipjJ+G21xbdnTBD7lWodZ8hWkU="),
+			},
+		),
 	}
-	if diff := cmp.Diff(wantSelected, gotSelected); diff != "" {
+	if diff := cmp.Diff(gotProviderLocks, wantProviderLocks, depsfile.ProviderLockComparer); diff != "" {
 		t.Errorf("wrong version selections after upgrade\n%s", diff)
 	}
 
@@ -1732,7 +1781,7 @@ func TestInit_pluginDirProviders(t *testing.T) {
 // Test user-supplied -plugin-dir doesn't allow auto-install
 func TestInit_pluginDirProvidersDoesNotGet(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-get-providers"), td)
+	testCopyDir(t, testFixturePath("init-get-providers"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1808,7 +1857,7 @@ func TestInit_pluginDirProvidersDoesNotGet(t *testing.T) {
 // Verify that plugin-dir doesn't prevent discovery of internal providers
 func TestInit_pluginDirWithBuiltIn(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-internal"), td)
+	testCopyDir(t, testFixturePath("init-internal"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1845,7 +1894,7 @@ func TestInit_invalidBuiltInProviders(t *testing.T) {
 	// - an explicit dependency on terraform.io/builtin/nonexist, which does
 	//   not exist at all.
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("init-internal-invalid"), td)
+	testCopyDir(t, testFixturePath("init-internal-invalid"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
@@ -1982,7 +2031,7 @@ func installFakeProviderPackagesElsewhere(t *testing.T, cacheDir *providercache.
 			if err != nil {
 				t.Fatalf("failed to prepare fake package for %s %s: %s", name, versionStr, err)
 			}
-			_, err = cacheDir.InstallPackage(context.Background(), meta)
+			_, err = cacheDir.InstallPackage(context.Background(), meta, nil)
 			if err != nil {
 				t.Fatalf("failed to install fake package for %s %s: %s", name, versionStr, err)
 			}
@@ -2004,7 +2053,7 @@ func installFakeProviderPackagesElsewhere(t *testing.T, cacheDir *providercache.
 // with how the getproviders and providercache packages build paths.
 func expectedPackageInstallPath(name, version string, exe bool) string {
 	platform := getproviders.CurrentPlatform
-	baseDir := ".terraform/plugins"
+	baseDir := ".terraform/providers"
 	if exe {
 		p := fmt.Sprintf("registry.terraform.io/hashicorp/%s/%s/%s/terraform-provider-%s_%s", name, version, platform, name, version)
 		if platform.OS == "windows" {

@@ -12,19 +12,17 @@ import (
 	"github.com/zclconf/go-cty/cty/convert"
 )
 
-// evalVariableValidations ensures ta all of the configured custom validations
+// evalVariableValidations ensures that all of the configured custom validations
 // for a variable are passing.
 //
 // This must be used only after any side-effects that make the value of the
 // variable available for use in expression evaluation, such as
 // EvalModuleCallArgument for variables in descendent modules.
-func evalVariableValidations(addr addrs.AbsInputVariableInstance, config *configs.Variable, expr hcl.Expression, ctx EvalContext) error {
+func evalVariableValidations(addr addrs.AbsInputVariableInstance, config *configs.Variable, expr hcl.Expression, ctx EvalContext) (diags tfdiags.Diagnostics) {
 	if config == nil || len(config.Validations) == 0 {
 		log.Printf("[TRACE] evalVariableValidations: not active for %s, so skipping", addr)
 		return nil
 	}
-
-	var diags tfdiags.Diagnostics
 
 	// Variable nodes evaluate in the parent module to where they were declared
 	// because the value expression (n.Expr, if set) comes from the calling
@@ -83,6 +81,11 @@ func evalVariableValidations(addr addrs.AbsInputVariableInstance, config *config
 			continue
 		}
 
+		// Validation condition may be marked if the input variable is bound to
+		// a sensitive value. This is irrelevant to the validation process, so
+		// we discard the marks now.
+		result, _ = result.Unmark()
+
 		if result.False() {
 			if expr != nil {
 				diags = diags.Append(&hcl.Diagnostic{
@@ -105,5 +108,5 @@ func evalVariableValidations(addr addrs.AbsInputVariableInstance, config *config
 		}
 	}
 
-	return diags.ErrWithWarnings()
+	return diags
 }

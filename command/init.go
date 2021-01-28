@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -31,16 +30,12 @@ import (
 // module and clones it to the working directory.
 type InitCommand struct {
 	Meta
-
-	// getPlugins is for the -get-plugins flag
-	getPlugins bool
 }
 
 func (c *InitCommand) Run(args []string) int {
 	var flagFromModule string
 	var flagBackend, flagGet, flagUpgrade bool
 	var flagPluginPath FlagStringSlice
-	var flagVerifyPlugins bool
 	flagConfigExtra := newRawFlags("-backend-config")
 
 	args = c.Meta.process(args)
@@ -49,14 +44,10 @@ func (c *InitCommand) Run(args []string) int {
 	cmdFlags.Var(flagConfigExtra, "backend-config", "")
 	cmdFlags.StringVar(&flagFromModule, "from-module", "", "copy the source of the given module into the directory before init")
 	cmdFlags.BoolVar(&flagGet, "get", true, "")
-	cmdFlags.BoolVar(&c.getPlugins, "get-plugins", true, "")
 	cmdFlags.BoolVar(&c.forceInitCopy, "force-copy", false, "suppress prompts about copying state data")
-	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
-	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.BoolVar(&c.reconfigure, "reconfigure", false, "reconfigure")
 	cmdFlags.BoolVar(&flagUpgrade, "upgrade", false, "")
 	cmdFlags.Var(&flagPluginPath, "plugin-dir", "plugin directory")
-	cmdFlags.BoolVar(&flagVerifyPlugins, "verify-plugins", true, "verify plugins")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -66,7 +57,6 @@ func (c *InitCommand) Run(args []string) int {
 
 	if len(flagPluginPath) > 0 {
 		c.pluginPath = flagPluginPath
-		c.getPlugins = false
 	}
 
 	// Validate the arg count
@@ -133,7 +123,7 @@ func (c *InitCommand) Run(args []string) int {
 		c.Ui.Output("")
 	}
 
-	// If our directory is empty, then we're done. We can't get or setup
+	// If our directory is empty, then we're done. We can't get or set up
 	// the backend with an empty directory.
 	empty, err := configs.IsEmptyDir(path)
 	if err != nil {
@@ -264,6 +254,7 @@ func (c *InitCommand) Run(args []string) int {
 	// on a previous run) we'll use the current state as a potential source
 	// of provider dependencies.
 	if back != nil {
+		c.ignoreRemoteBackendVersionConflict(back)
 		workspace, err := c.Workspace()
 		if err != nil {
 			c.Ui.Error(fmt.Sprintf("Error selecting workspace: %s", err))
@@ -281,10 +272,6 @@ func (c *InitCommand) Run(args []string) int {
 		}
 
 		state = sMgr.State()
-	}
-
-	if v := os.Getenv(ProviderSkipVerifyEnvVar); v != "" {
-		c.ignorePluginChecksum = true
 	}
 
 	// Now that we have loaded all modules, check the module tree for missing providers.
@@ -325,9 +312,9 @@ func (c *InitCommand) getModules(path string, earlyRoot *tfconfig.Module, upgrad
 	}
 
 	if upgrade {
-		c.Ui.Output(c.Colorize().Color(fmt.Sprintf("[reset][bold]Upgrading modules...")))
+		c.Ui.Output(c.Colorize().Color("[reset][bold]Upgrading modules..."))
 	} else {
-		c.Ui.Output(c.Colorize().Color(fmt.Sprintf("[reset][bold]Initializing modules...")))
+		c.Ui.Output(c.Colorize().Color("[reset][bold]Initializing modules..."))
 	}
 
 	hooks := uiModuleInstallHooks{
@@ -354,7 +341,7 @@ func (c *InitCommand) getModules(path string, earlyRoot *tfconfig.Module, upgrad
 }
 
 func (c *InitCommand) initBackend(root *configs.Module, extraConfig rawFlags) (be backend.Backend, output bool, diags tfdiags.Diagnostics) {
-	c.Ui.Output(c.Colorize().Color(fmt.Sprintf("\n[reset][bold]Initializing the backend...")))
+	c.Ui.Output(c.Colorize().Color("\n[reset][bold]Initializing the backend..."))
 
 	var backendConfig *configs.Backend
 	var backendConfigOverride hcl.Body
@@ -422,15 +409,34 @@ the backend configuration is present and valid.
 func (c *InitCommand) getProviders(config *configs.Config, state *states.State, upgrade bool, pluginDirs []string) (output, abort bool, diags tfdiags.Diagnostics) {
 	// First we'll collect all the provider dependencies we can see in the
 	// configuration and the state.
-	reqs, moreDiags := config.ProviderRequirements()
-	diags = diags.Append(moreDiags)
-	if moreDiags.HasErrors() {
+	reqs, hclDiags := config.ProviderRequirements()
+	diags = diags.Append(hclDiags)
+	if hclDiags.HasErrors() {
 		return false, true, diags
 	}
-	stateReqs := make(getproviders.Requirements, 0)
 	if state != nil {
-		stateReqs = state.ProviderRequirements()
+		stateReqs := state.ProviderRequirements()
 		reqs = reqs.Merge(stateReqs)
+	}
+
+	for providerAddr := range reqs {
+		if providerAddr.IsLegacy() {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Invalid legacy provider address",
+				fmt.Sprintf(
+					"This configuration or its associated state refers to the unqualified provider %q.\n\nYou must complete the Terraform 0.13 upgrade process before upgrading to later versions.",
+					providerAddr.Type,
+				),
+			))
+		}
+	}
+
+	previousLocks, moreDiags := c.lockedDependencies()
+	diags = diags.Append(moreDiags)
+
+	if diags.HasErrors() {
+		return false, true, diags
 	}
 
 	var inst *providercache.Installer
@@ -452,15 +458,9 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 		log.Printf("[DEBUG] will search for provider plugins in %s", pluginDirs)
 	}
 
-	// We capture any missing provider errors (404s from a Registry source) for
-	// later analysis, to provide more useful diagnostics if the providers
-	// appear to have been re-namespaced.
-	missingProviderErrors := make(map[addrs.Provider]error)
-
-	// Legacy provider addresses required by source probably refer to in-house
-	// providers. Capture these for later analysis also, to suggest how to use
-	// the state replace-provider command to fix this problem.
-	stateLegacyProviderErrors := make(map[addrs.Provider]error)
+	// Installation can be aborted by interruption signals
+	ctx, done := c.InterruptibleContext()
+	defer done()
 
 	// Because we're currently just streaming a series of events sequentially
 	// into the terminal, we're showing only a subset of the events to keep
@@ -486,11 +486,15 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 				fmt.Sprintf("Cannot use %s: %s.", provider.ForDisplay(), err),
 			))
 		},
-		QueryPackagesBegin: func(provider addrs.Provider, versionConstraints getproviders.VersionConstraints) {
-			if len(versionConstraints) > 0 {
-				c.Ui.Info(fmt.Sprintf("- Finding %s versions matching %q...", provider.ForDisplay(), getproviders.VersionConstraintsString(versionConstraints)))
+		QueryPackagesBegin: func(provider addrs.Provider, versionConstraints getproviders.VersionConstraints, locked bool) {
+			if locked {
+				c.Ui.Info(fmt.Sprintf("- Reusing previous version of %s from the dependency lock file", provider.ForDisplay()))
 			} else {
-				c.Ui.Info(fmt.Sprintf("- Finding latest version of %s...", provider.ForDisplay()))
+				if len(versionConstraints) > 0 {
+					c.Ui.Info(fmt.Sprintf("- Finding %s versions matching %q...", provider.ForDisplay(), getproviders.VersionConstraintsString(versionConstraints)))
+				} else {
+					c.Ui.Info(fmt.Sprintf("- Finding latest version of %s...", provider.ForDisplay()))
+				}
 			}
 		},
 		LinkFromCacheBegin: func(provider addrs.Provider, version getproviders.Version, cacheRoot string) {
@@ -505,7 +509,7 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 				sources := errorTy.Sources
 				displaySources := make([]string, len(sources))
 				for i, source := range sources {
-					displaySources[i] = fmt.Sprintf("- %s", source)
+					displaySources[i] = fmt.Sprintf("  - %s", source)
 				}
 				diags = diags.Append(tfdiags.Sourceless(
 					tfdiags.Error,
@@ -515,27 +519,24 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 					),
 				))
 			case getproviders.ErrRegistryProviderNotKnown:
-				if provider.IsDefault() {
-					// Default providers may have no explicit source, and the 404
-					// error could be caused by re-namespacing. Add the provider
-					// and error to a map to later check for this case. We don't
-					// run the check here to keep this event callback simple.
-					missingProviderErrors[provider] = err
-				} else if _, ok := stateReqs[provider]; ok && provider.IsLegacy() {
-					// Legacy provider, from state, not found from any source:
-					// probably an in-house provider. Record this here to
-					// faciliate a useful suggestion later.
-					stateLegacyProviderErrors[provider] = err
-				} else {
-					// Otherwise maybe this provider really doesn't exist? Shrug!
-					diags = diags.Append(tfdiags.Sourceless(
-						tfdiags.Error,
-						"Failed to query available provider packages",
-						fmt.Sprintf("Could not retrieve the list of available versions for provider %s: %s",
-							provider.ForDisplay(), err,
-						),
-					))
+				// We might be able to suggest an alternative provider to use
+				// instead of this one.
+				var suggestion string
+				alternative := getproviders.MissingProviderSuggestion(ctx, provider, inst.ProviderSource())
+				if alternative != provider {
+					suggestion = fmt.Sprintf(
+						"\n\nDid you intend to use %s? If so, you must specify that source address in each module which requires that provider. To see which modules are currently depending on %s, run the following command:\n    terraform providers",
+						alternative.ForDisplay(), provider.ForDisplay(),
+					)
 				}
+
+				diags = diags.Append(tfdiags.Sourceless(
+					tfdiags.Error,
+					"Failed to query available provider packages",
+					fmt.Sprintf("Could not retrieve the list of available versions for provider %s: %s%s",
+						provider.ForDisplay(), err, suggestion,
+					),
+				))
 			case getproviders.ErrHostNoProviders:
 				switch {
 				case errorTy.Hostname == svchost.Hostname("github.com") && !errorTy.HasOtherVersion:
@@ -713,7 +714,7 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 			if thirdPartySigned {
 				c.Ui.Info(fmt.Sprintf("\nPartner and community providers are signed by their developers.\n" +
 					"If you'd like to know more about provider signing, you can read about it here:\n" +
-					"https://www.terraform.io/docs/plugins/signing.html"))
+					"https://www.terraform.io/docs/cli/plugins/signing.html"))
 			}
 		},
 		HashPackageFailure: func(provider addrs.Provider, version getproviders.Version, err error) {
@@ -729,159 +730,25 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 			))
 		},
 	}
+	ctx = evts.OnContext(ctx)
+
+	// Dev overrides cause the result of "terraform init" to be irrelevant for
+	// any overridden providers, so we'll warn about it to avoid later
+	// confusion when Terraform ends up using a different provider than the
+	// lock file called for.
+	diags = diags.Append(c.providerDevOverrideWarnings())
 
 	mode := providercache.InstallNewProvidersOnly
 	if upgrade {
 		mode = providercache.InstallUpgrades
 	}
-	// Installation can be aborted by interruption signals
-	ctx, done := c.InterruptibleContext()
-	defer done()
-	ctx = evts.OnContext(ctx)
-	selected, err := inst.EnsureProviderVersions(ctx, reqs, mode)
+	newLocks, err := inst.EnsureProviderVersions(ctx, previousLocks, reqs, mode)
 	if ctx.Err() == context.Canceled {
 		c.showDiagnostics(diags)
 		c.Ui.Error("Provider installation was canceled by an interrupt signal.")
 		return true, true, diags
 	}
 	if err != nil {
-		// Build a map of provider address to modules using the provider,
-		// so that we can later show diagnostics about affected modules
-		reqs, _ := config.ProviderRequirementsByModule()
-		providerToReqs := make(map[addrs.Provider][]*configs.ModuleRequirements)
-		c.populateProviderToReqs(providerToReqs, reqs)
-
-		// Try to look up any missing providers which may be redirected legacy
-		// providers. If we're successful, construct a "did you mean?" diag to
-		// suggest how to fix this. Otherwise, add a simple error diag
-		// explaining that the provider could not be found.
-		foundProviders := make(map[addrs.Provider]addrs.Provider)
-		source := c.providerInstallSource()
-		for provider, fetchErr := range missingProviderErrors {
-			addr := addrs.NewLegacyProvider(provider.Type)
-			p, redirect, err := getproviders.LookupLegacyProvider(ctx, addr, source)
-			if err == nil {
-				if redirect.IsZero() {
-					foundProviders[provider] = p
-				} else {
-					foundProviders[provider] = redirect
-				}
-			} else {
-				diags = diags.Append(tfdiags.Sourceless(
-					tfdiags.Error,
-					"Failed to install provider",
-					fmt.Sprintf("Error while installing %s: %s.", provider.ForDisplay(), fetchErr),
-				))
-			}
-		}
-		if len(foundProviders) > 0 {
-			// Build list of provider suggestions, and track a list of local
-			// and remote modules which need to be upgraded
-			var providerSuggestions string
-			localModules := make(map[string]struct{})
-			remoteModules := make(map[*configs.ModuleRequirements]struct{})
-			for missingProvider, foundProvider := range foundProviders {
-				providerSuggestions += fmt.Sprintf("  %s -> %s\n", missingProvider.ForDisplay(), foundProvider.ForDisplay())
-				exists := struct{}{}
-				for _, reqs := range providerToReqs[missingProvider] {
-					src := reqs.SourceAddr
-					// Treat the root module and any others with local source
-					// addresses as fixable with 0.13upgrade. Remote modules
-					// must be upgraded elsewhere and therefore are listed
-					// separately
-					if src == "" || isLocalSourceAddr(src) {
-						localModules[reqs.SourceDir] = exists
-					} else {
-						remoteModules[reqs] = exists
-					}
-				}
-			}
-
-			// Create sorted list of 0.13upgrade commands with the affected
-			// source dirs
-			var upgradeCommands []string
-			for dir := range localModules {
-				upgradeCommands = append(upgradeCommands, fmt.Sprintf("terraform 0.13upgrade %s", dir))
-			}
-			sort.Strings(upgradeCommands)
-			command := "command"
-			if len(upgradeCommands) > 1 {
-				command = "commands"
-			}
-
-			// Display detailed diagnostic results, including the missing and
-			// found provider FQNs, and the suggested series of upgrade
-			// commands to fix this
-			var detail strings.Builder
-
-			fmt.Fprintf(&detail, "Could not find required providers, but found possible alternatives:\n\n%s\n", providerSuggestions)
-
-			fmt.Fprintf(&detail, "If these suggestions look correct, upgrade your configuration with the following %s:", command)
-			for _, upgradeCommand := range upgradeCommands {
-				fmt.Fprintf(&detail, "\n    %s", upgradeCommand)
-			}
-
-			if len(remoteModules) > 0 {
-				fmt.Fprintf(&detail, "\n\nThe following remote modules must also be upgraded for Terraform 0.13 compatibility:")
-				for remoteModule := range remoteModules {
-					fmt.Fprintf(&detail, "\n- module.%s at %s", remoteModule.Name, remoteModule.SourceAddr)
-				}
-			}
-
-			diags = diags.Append(tfdiags.Sourceless(
-				tfdiags.Error,
-				"Failed to install providers",
-				detail.String(),
-			))
-		}
-
-		// Legacy providers required by state which could not be installed are
-		// probably in-house providers. If the user has completed the necessary
-		// steps to make their custom provider available for installation, then
-		// there should be a provider with the same type selected after the
-		// installation process completed.
-		//
-		// If we detect this specific situation, we can confidently suggest
-		// that the next step is to run the state replace-provider command to
-		// update state. We build a map of provider replacements here to ensure
-		// that we're as concise as possible with the diagnostic.
-		stateReplaceProviders := make(map[addrs.Provider]addrs.Provider)
-		for provider, fetchErr := range stateLegacyProviderErrors {
-			var sameType []addrs.Provider
-			for p := range selected {
-				if p.Type == provider.Type {
-					sameType = append(sameType, p)
-				}
-			}
-			if len(sameType) == 1 {
-				stateReplaceProviders[provider] = sameType[0]
-			} else {
-				diags = diags.Append(tfdiags.Sourceless(
-					tfdiags.Error,
-					"Failed to install provider",
-					fmt.Sprintf("Error while installing %s: %s", provider.ForDisplay(), fetchErr),
-				))
-			}
-		}
-		if len(stateReplaceProviders) > 0 {
-			var detail strings.Builder
-			command := "command"
-			if len(stateReplaceProviders) > 1 {
-				command = "commands"
-			}
-
-			fmt.Fprintf(&detail, "Found unresolvable legacy provider references in state. It looks like these refer to in-house providers. You can update the resources in state with the following %s:\n", command)
-			for legacy, replacement := range stateReplaceProviders {
-				fmt.Fprintf(&detail, "\n    terraform state replace-provider %s %s", legacy, replacement)
-			}
-
-			diags = diags.Append(tfdiags.Sourceless(
-				tfdiags.Error,
-				"Failed to install legacy providers required by state",
-				detail.String(),
-			))
-		}
-
 		// The errors captured in "err" should be redundant with what we
 		// received via the InstallerEvents callbacks above, so we'll
 		// just return those as long as we have some.
@@ -892,41 +759,43 @@ func (c *InitCommand) getProviders(config *configs.Config, state *states.State, 
 		return true, true, diags
 	}
 
-	// If any providers have "floating" versions (completely unconstrained)
-	// we'll suggest the user constrain with a pessimistic constraint to
-	// avoid implicitly adopting a later major release.
-	constraintSuggestions := make(map[string]string)
-	for addr, version := range selected {
-		req := reqs[addr]
-
-		if len(req) == 0 {
-			constraintSuggestions[addr.ForDisplay()] = "~> " + version.String()
+	// If the provider dependencies have changed since the last run then we'll
+	// say a little about that in case the reader wasn't expecting a change.
+	// (When we later integrate module dependencies into the lock file we'll
+	// probably want to refactor this so that we produce one lock-file related
+	// message for all changes together, but this is here for now just because
+	// it's the smallest change relative to what came before it, which was
+	// a hidden JSON file specifically for tracking providers.)
+	if !newLocks.Equal(previousLocks) {
+		if previousLocks.Empty() {
+			// A change from empty to non-empty is special because it suggests
+			// we're running "terraform init" for the first time against a
+			// new configuration. In that case we'll take the opportunity to
+			// say a little about what the dependency lock file is, for new
+			// users or those who are upgrading from a previous Terraform
+			// version that didn't have dependency lock files.
+			c.Ui.Output(c.Colorize().Color(`
+Terraform has created a lock file [bold].terraform.lock.hcl[reset] to record the provider
+selections it made above. Include this file in your version control repository
+so that Terraform can guarantee to make the same selections by default when
+you run "terraform init" in the future.`))
+		} else {
+			c.Ui.Output(c.Colorize().Color(`
+Terraform has made some changes to the provider dependency selections recorded
+in the .terraform.lock.hcl file. Review those changes and commit them to your
+version control system if they represent changes you intended to make.`))
 		}
 	}
-	if len(constraintSuggestions) != 0 {
-		names := make([]string, 0, len(constraintSuggestions))
-		for name := range constraintSuggestions {
-			names = append(names, name)
-		}
-		sort.Strings(names)
 
-		c.Ui.Output(outputInitProvidersUnconstrained)
-		for _, name := range names {
-			c.Ui.Output(fmt.Sprintf("* %s: version = %q", name, constraintSuggestions[name]))
-		}
-	}
+	// TODO: Check whether newLocks is different from previousLocks and mention
+	// in the UI if so. We should emit a different message if previousLocks was
+	// empty, because that indicates we were creating a lock file for the first
+	// time and so we need to introduce the user to the idea of it.
+
+	moreDiags = c.replaceLockedDependencies(newLocks)
+	diags = diags.Append(moreDiags)
 
 	return true, false, diags
-}
-
-func (c *InitCommand) populateProviderToReqs(reqs map[addrs.Provider][]*configs.ModuleRequirements, node *configs.ModuleRequirements) {
-	for fqn := range node.Requirements {
-		reqs[fqn] = append(reqs[fqn], node)
-	}
-
-	for _, child := range node.Children {
-		c.populateProviderToReqs(reqs, child)
-	}
 }
 
 // backendConfigOverrideBody interprets the raw values of -backend-config
@@ -1045,15 +914,11 @@ func (c *InitCommand) AutocompleteFlags() complete.Flags {
 		"-force-copy":     complete.PredictNothing,
 		"-from-module":    completePredictModuleSource,
 		"-get":            completePredictBoolean,
-		"-get-plugins":    completePredictBoolean,
 		"-input":          completePredictBoolean,
-		"-lock":           completePredictBoolean,
-		"-lock-timeout":   complete.PredictAnything,
 		"-no-color":       complete.PredictNothing,
 		"-plugin-dir":     complete.PredictDirs(""),
 		"-reconfigure":    complete.PredictNothing,
 		"-upgrade":        completePredictBoolean,
-		"-verify-plugins": completePredictBoolean,
 	}
 }
 
@@ -1097,37 +962,28 @@ Options:
 
   -get=true            Download any modules for this configuration.
 
-  -get-plugins=true    Download any missing plugins for this configuration.
-
   -input=true          Ask for input if necessary. If false, will error if
                        input was required.
-
-  -lock=true           Lock the state file when locking is supported.
-
-  -lock-timeout=0s     Duration to retry a state lock.
 
   -no-color            If specified, output won't contain any color.
 
   -plugin-dir          Directory containing plugin binaries. This overrides all
-                       default search paths for plugins, and prevents the 
+                       default search paths for plugins, and prevents the
                        automatic installation of plugins. This flag can be used
                        multiple times.
 
   -reconfigure         Reconfigure the backend, ignoring any saved
                        configuration.
 
-  -upgrade=false       If installing modules (-get) or plugins (-get-plugins),
-                       ignore previously-downloaded objects and install the
+  -upgrade=false       If installing modules (-get) or plugins, ignore
+                       previously-downloaded objects and install the
                        latest version allowed within configured constraints.
-
-  -verify-plugins=true Verify the authenticity and integrity of automatically
-                       downloaded plugins.
 `
 	return strings.TrimSpace(helpText)
 }
 
 func (c *InitCommand) Synopsis() string {
-	return "Initialize a Terraform working directory"
+	return "Prepare your working directory for other commands"
 }
 
 const errInitConfigError = `
@@ -1166,126 +1022,6 @@ rerun this command to reinitialize your working directory. If you forget, other
 commands will detect it and remind you to do so if necessary.
 `
 
-const outputInitProvidersUnconstrained = `
-The following providers do not have any version constraints in configuration,
-so the latest version was installed.
-
-To prevent automatic upgrades to new major versions that may contain breaking
-changes, we recommend adding version constraints in a required_providers block
-in your configuration, with the constraint strings suggested below.
-`
-
-const errDiscoveryServiceUnreachable = `
-[reset][bold][red]Registry service unreachable.[reset][red]
-
-This may indicate a network issue, or an issue with the requested Terraform Registry.
-`
-
-const errProviderNotFound = `
-[reset][bold][red]Provider %[1]q not available for installation.[reset][red]
-
-A provider named %[1]q could not be found in the Terraform Registry.
-
-This may result from mistyping the provider name, or the given provider may
-be a third-party provider that cannot be installed automatically.
-
-In the latter case, the plugin must be installed manually by locating and
-downloading a suitable distribution package and placing the plugin's executable
-file in the following directory:
-    %[2]s
-
-Terraform detects necessary plugins by inspecting the configuration and state.
-To view the provider versions requested by each module, run
-"terraform providers".
-`
-
-const errProviderVersionsUnsuitable = `
-[reset][bold][red]No provider %[1]q plugins meet the constraint %[2]q.[reset][red]
-
-The version constraint is derived from the "version" argument within the
-provider %[1]q block in configuration. Child modules may also apply
-provider version constraints. To view the provider versions requested by each
-module in the current configuration, run "terraform providers".
-
-To proceed, the version constraints for this provider must be relaxed by
-either adjusting or removing the "version" argument in the provider blocks
-throughout the configuration.
-`
-
-const errProviderIncompatible = `
-[reset][bold][red]No available provider %[1]q plugins are compatible with this Terraform version.[reset][red]
-
-From time to time, new Terraform major releases can change the requirements for
-plugins such that older plugins become incompatible.
-
-Terraform checked all of the plugin versions matching the given constraint:
-    %[2]s
-
-Unfortunately, none of the suitable versions are compatible with this version
-of Terraform. If you have recently upgraded Terraform, it may be necessary to
-move to a newer major release of this provider. Alternatively, if you are
-attempting to upgrade the provider to a new major version you may need to
-also upgrade Terraform to support the new version.
-
-Consult the documentation for this provider for more information on
-compatibility between provider versions and Terraform versions.
-`
-
-const errProviderInstallError = `
-[reset][bold][red]Error installing provider %[1]q: %[2]s.[reset][red]
-
-Terraform analyses the configuration and state and automatically downloads
-plugins for the providers used. However, when attempting to download this
-plugin an unexpected error occurred.
-
-This may be caused if for some reason Terraform is unable to reach the
-plugin repository. The repository may be unreachable if access is blocked
-by a firewall.
-
-If automatic installation is not possible or desirable in your environment,
-you may alternatively manually install plugins by downloading a suitable
-distribution package and placing the plugin's executable file in the
-following directory:
-    %[3]s
-`
-
-const errMissingProvidersNoInstall = `
-[reset][bold][red]Missing required providers.[reset][red]
-
-The following provider constraints are not met by the currently-installed
-provider plugins:
-
-%[1]s
-Terraform can automatically download and install plugins to meet the given
-constraints, but this step was skipped due to the use of -get-plugins=false
-and/or -plugin-dir on the command line.
-
-If automatic installation is not possible or desirable in your environment,
-you may manually install plugins by downloading a suitable distribution package
-and placing the plugin's executable file in one of the directories given in
-by -plugin-dir on the command line, or in the following directory if custom
-plugin directories are not set:
-    %[2]s
-`
-
-const errChecksumVerification = `
-[reset][bold][red]Error verifying checksum for provider %[1]q[reset][red]
-The checksum for provider distribution from the Terraform Registry
-did not match the source. This may mean that the distributed files
-were changed after this version was released to the Registry.
-`
-
-const errSignatureVerification = `
-[reset][bold][red]Error:[reset][bold] Untrusted signing key for provider %[1]q[reset]
-
-This provider package is not signed with the HashiCorp signing key, and is
-therefore incompatible with Terraform v%[2]s.
-
-A later version of Terraform may have introduced other signing keys that would
-accept this provider. Alternatively, an earlier version of this provider may
-be compatible with Terraform v%[2]s.
-`
-
 // providerProtocolTooOld is a message sent to the CLI UI if the provider's
 // supported protocol versions are too old for the user's version of terraform,
 // but a newer version of the provider is compatible.
@@ -1316,20 +1052,3 @@ Alternatively, upgrade to the latest version of Terraform for compatibility with
 
 // No version of the provider is compatible.
 const errProviderVersionIncompatible = `No compatible versions of provider %s were found.`
-
-// Logic from internal/initwd/getter.go
-var localSourcePrefixes = []string{
-	"./",
-	"../",
-	".\\",
-	"..\\",
-}
-
-func isLocalSourceAddr(addr string) bool {
-	for _, prefix := range localSourcePrefixes {
-		if strings.HasPrefix(addr, prefix) {
-			return true
-		}
-	}
-	return false
-}

@@ -45,11 +45,11 @@ func buildProviderConfig(ctx EvalContext, addr addrs.AbsProviderConfig, config *
 	}
 }
 
-// GetProvider returns the providers.Interface and schema for a given provider.
-func GetProvider(ctx EvalContext, addr addrs.AbsProviderConfig) (providers.Interface, *ProviderSchema, error) {
+// getProvider returns the providers.Interface and schema for a given provider.
+func getProvider(ctx EvalContext, addr addrs.AbsProviderConfig) (providers.Interface, *ProviderSchema, error) {
 	if addr.Provider.Type == "" {
 		// Should never happen
-		panic("EvalGetProvider used with uninitialized provider configuration address")
+		panic("GetProvider used with uninitialized provider configuration address")
 	}
 	provider := ctx.Provider(addr)
 	if provider == nil {
@@ -59,43 +59,4 @@ func GetProvider(ctx EvalContext, addr addrs.AbsProviderConfig) (providers.Inter
 	// schema to the callers.
 	schema := ctx.ProviderSchema(addr)
 	return provider, schema, nil
-}
-
-// EvalGetProvider is an EvalNode implementation that retrieves an already
-// initialized provider instance for the given name.
-//
-// Unlike most eval nodes, this takes an _absolute_ provider configuration,
-// because providers can be passed into and inherited between modules.
-// Resource nodes must therefore know the absolute path of the provider they
-// will use, which is usually accomplished by implementing
-// interface GraphNodeProviderConsumer.
-type EvalGetProvider struct {
-	Addr   addrs.AbsProviderConfig
-	Output *providers.Interface
-
-	// If non-nil, Schema will be updated after eval to refer to the
-	// schema of the provider.
-	Schema **ProviderSchema
-}
-
-func (n *EvalGetProvider) Eval(ctx EvalContext) (interface{}, error) {
-	if n.Addr.Provider.Type == "" {
-		// Should never happen
-		panic("EvalGetProvider used with uninitialized provider configuration address")
-	}
-
-	result := ctx.Provider(n.Addr)
-	if result == nil {
-		return nil, fmt.Errorf("provider %s not initialized", n.Addr)
-	}
-
-	if n.Output != nil {
-		*n.Output = result
-	}
-
-	if n.Schema != nil {
-		*n.Schema = ctx.ProviderSchema(n.Addr)
-	}
-
-	return nil, nil
 }

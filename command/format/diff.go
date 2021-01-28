@@ -14,7 +14,6 @@ import (
 
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/helper/experiment"
 	"github.com/hashicorp/terraform/plans"
 	"github.com/hashicorp/terraform/plans/objchange"
 	"github.com/hashicorp/terraform/states"
@@ -99,7 +98,6 @@ func ResourceChange(
 		color:           color,
 		action:          change.Action,
 		requiredReplace: change.RequiredReplace,
-		concise:         experiment.Enabled(experiment.X_concise_diff),
 	}
 
 	// Most commonly-used resources have nested blocks that result in us
@@ -154,10 +152,9 @@ func OutputChanges(
 ) string {
 	var buf bytes.Buffer
 	p := blockBodyDiffPrinter{
-		buf:     &buf,
-		color:   color,
-		action:  plans.Update, // not actually used in this case, because we're not printing a containing block
-		concise: experiment.Enabled(experiment.X_concise_diff),
+		buf:    &buf,
+		color:  color,
+		action: plans.Update, // not actually used in this case, because we're not printing a containing block
 	}
 
 	// We're going to reuse the codepath we used for printing resource block
@@ -200,7 +197,8 @@ type blockBodyDiffPrinter struct {
 	color           *colorstring.Colorize
 	action          plans.Action
 	requiredReplace cty.PathSet
-	concise         bool
+	// verbose is set to true when using the "diff" printer to format state
+	verbose bool
 }
 
 type blockBodyDiffResult struct {
@@ -307,12 +305,6 @@ func (p *blockBodyDiffPrinter) writeBlockBodyDiff(schema *configschema.Block, ol
 func getPlanActionAndShow(old cty.Value, new cty.Value) (plans.Action, bool) {
 	var action plans.Action
 	showJustNew := false
-	if old.ContainsMarked() {
-		old, _ = old.UnmarkDeep()
-	}
-	if new.ContainsMarked() {
-		new, _ = new.UnmarkDeep()
-	}
 	switch {
 	case old.IsNull():
 		action = plans.Create
@@ -332,13 +324,13 @@ func (p *blockBodyDiffPrinter) writeAttrDiff(name string, attrS *configschema.At
 	path = append(path, cty.GetAttrStep{Name: name})
 	action, showJustNew := getPlanActionAndShow(old, new)
 
-	if action == plans.NoOp && p.concise && !identifyingAttribute(name, attrS) {
+	if action == plans.NoOp && !p.verbose && !identifyingAttribute(name, attrS) {
 		return true
 	}
 
 	p.buf.WriteString("\n")
 
-	p.writeSensitivityWarning(old, new, indent, action)
+	p.writeSensitivityWarning(old, new, indent, action, false)
 
 	p.buf.WriteString(strings.Repeat(" ", indent))
 	p.writeActionSymbol(action)
@@ -375,6 +367,14 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 	if old.IsNull() && new.IsNull() {
 		// Nothing to do if both old and new is null
 		return skippedBlocks
+	}
+
+	// If either the old or the new value is marked,
+	// Display a special diff because it is irrelevant
+	// to list all obfuscated attributes as (sensitive)
+	if old.IsMarked() || new.IsMarked() {
+		p.writeSensitiveNestedBlockDiff(name, old, new, indent, blankBefore, path)
+		return 0
 	}
 
 	// Where old/new are collections representing a nesting mode other than
@@ -581,8 +581,47 @@ func (p *blockBodyDiffPrinter) writeNestedBlockDiffs(name string, blockS *config
 	return skippedBlocks
 }
 
+func (p *blockBodyDiffPrinter) writeSensitiveNestedBlockDiff(name string, old, new cty.Value, indent int, blankBefore bool, path cty.Path) {
+	var action plans.Action
+	switch {
+	case old.IsNull():
+		action = plans.Create
+	case new.IsNull():
+		action = plans.Delete
+	case !new.IsWhollyKnown() || !old.IsWhollyKnown():
+		// "old" should actually always be known due to our contract
+		// that old values must never be unknown, but we'll allow it
+		// anyway to be robust.
+		action = plans.Update
+	case !ctyEqualValueAndMarks(old, new):
+		action = plans.Update
+	}
+
+	if blankBefore {
+		p.buf.WriteRune('\n')
+	}
+
+	// New line before warning printing
+	p.buf.WriteRune('\n')
+	p.writeSensitivityWarning(old, new, indent, action, true)
+	p.buf.WriteString(strings.Repeat(" ", indent))
+	p.writeActionSymbol(action)
+	fmt.Fprintf(p.buf, "%s {", name)
+	if action != plans.NoOp && p.pathForcesNewResource(path) {
+		p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
+	}
+	p.buf.WriteRune('\n')
+	p.buf.WriteString(strings.Repeat(" ", indent+4))
+	p.buf.WriteString("# At least one attribute in this block is (or was) sensitive,\n")
+	p.buf.WriteString(strings.Repeat(" ", indent+4))
+	p.buf.WriteString("# so its contents will not be displayed.")
+	p.buf.WriteRune('\n')
+	p.buf.WriteString(strings.Repeat(" ", indent+2))
+	p.buf.WriteString("}")
+}
+
 func (p *blockBodyDiffPrinter) writeNestedBlockDiff(name string, label *string, blockS *configschema.Block, action plans.Action, old, new cty.Value, indent int, path cty.Path) bool {
-	if action == plans.NoOp && p.concise {
+	if action == plans.NoOp && !p.verbose {
 		return true
 	}
 
@@ -777,26 +816,21 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 	// However, these specialized implementations can apply only if both
 	// values are known and non-null.
 	if old.IsKnown() && new.IsKnown() && !old.IsNull() && !new.IsNull() && typesEqual {
-		// Create unmarked values for comparisons
-		unmarkedOld, oldMarks := old.UnmarkDeep()
-		unmarkedNew, newMarks := new.UnmarkDeep()
-		switch {
-		case ty == cty.Bool || ty == cty.Number:
-			if len(oldMarks) > 0 || len(newMarks) > 0 {
-				p.buf.WriteString("(sensitive)")
-				return
+		if old.IsMarked() || new.IsMarked() {
+			p.buf.WriteString("(sensitive)")
+			if p.pathForcesNewResource(path) {
+				p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
 			}
+			return
+		}
+
+		switch {
 		case ty == cty.String:
 			// We have special behavior for both multi-line strings in general
 			// and for strings that can parse as JSON. For the JSON handling
 			// to apply, both old and new must be valid JSON.
 			// For single-line strings that don't parse as JSON we just fall
 			// out of this switch block and do the default old -> new rendering.
-
-			if len(oldMarks) > 0 || len(newMarks) > 0 {
-				p.buf.WriteString("(sensitive)")
-				return
-			}
 			oldS := old.AsString()
 			newS := new.AsString()
 
@@ -841,11 +875,11 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 				}
 			}
 
-			if strings.Index(oldS, "\n") < 0 && strings.Index(newS, "\n") < 0 {
+			if !strings.Contains(oldS, "\n") && !strings.Contains(newS, "\n") {
 				break
 			}
 
-			p.buf.WriteString("<<~EOT")
+			p.buf.WriteString("<<-EOT")
 			if p.pathForcesNewResource(path) {
 				p.buf.WriteString(p.color.Color(forcesNewResourceCaption))
 			}
@@ -947,7 +981,7 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 					action = plans.NoOp
 				}
 
-				if action == plans.NoOp && p.concise {
+				if action == plans.NoOp && !p.verbose {
 					suppressedElements++
 					continue
 				}
@@ -987,8 +1021,7 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 			var changeShown bool
 
 			for i := 0; i < len(elemDiffs); i++ {
-				// In concise mode, push any no-op diff elements onto the stack
-				if p.concise {
+				if !p.verbose {
 					for i < len(elemDiffs) && elemDiffs[i].Action == plans.NoOp {
 						suppressedElements = append(suppressedElements, elemDiffs[i])
 						i++
@@ -1016,7 +1049,6 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 					if hidden > 0 && i < len(elemDiffs) {
 						hidden--
 						nextContextDiff = suppressedElements[hidden]
-						suppressedElements = suppressedElements[:hidden]
 					}
 
 					// If there are still hidden elements, show an elision
@@ -1114,13 +1146,17 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 					action = plans.Create
 				} else if new.HasIndex(kV).False() {
 					action = plans.Delete
-				} else if eqV := unmarkedOld.Index(kV).Equals(unmarkedNew.Index(kV)); eqV.IsKnown() && eqV.True() {
-					action = plans.NoOp
-				} else {
-					action = plans.Update
 				}
 
-				if action == plans.NoOp && p.concise {
+				if old.HasIndex(kV).True() && new.HasIndex(kV).True() {
+					if ctyEqualValueAndMarks(old.Index(kV), new.Index(kV)) {
+						action = plans.NoOp
+					} else {
+						action = plans.Update
+					}
+				}
+
+				if action == plans.NoOp && !p.verbose {
 					suppressedElements++
 					continue
 				}
@@ -1129,7 +1165,7 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 
 				oldV := old.Index(kV)
 				newV := new.Index(kV)
-				p.writeSensitivityWarning(oldV, newV, indent+2, action)
+				p.writeSensitivityWarning(oldV, newV, indent+2, action, false)
 
 				p.buf.WriteString(strings.Repeat(" ", indent+2))
 				p.writeActionSymbol(action)
@@ -1215,13 +1251,13 @@ func (p *blockBodyDiffPrinter) writeValueDiff(old, new cty.Value, indent int, pa
 					action = plans.Create
 				} else if !new.Type().HasAttribute(kV) {
 					action = plans.Delete
-				} else if eqV := old.GetAttr(kV).Equals(new.GetAttr(kV)); eqV.IsKnown() && eqV.True() {
+				} else if ctyEqualValueAndMarks(old.GetAttr(kV), new.GetAttr(kV)) {
 					action = plans.NoOp
 				} else {
 					action = plans.Update
 				}
 
-				if action == plans.NoOp && p.concise {
+				if action == plans.NoOp && !p.verbose {
 					suppressedElements++
 					continue
 				}
@@ -1307,15 +1343,21 @@ func (p *blockBodyDiffPrinter) writeActionSymbol(action plans.Action) {
 	}
 }
 
-func (p *blockBodyDiffPrinter) writeSensitivityWarning(old, new cty.Value, indent int, action plans.Action) {
+func (p *blockBodyDiffPrinter) writeSensitivityWarning(old, new cty.Value, indent int, action plans.Action, isBlock bool) {
 	// Dont' show this warning for create or delete
 	if action == plans.Create || action == plans.Delete {
 		return
 	}
 
+	// Customize the warning based on if it is an attribute or block
+	diffType := "attribute value"
+	if isBlock {
+		diffType = "block"
+	}
+
 	if new.IsMarked() && !old.IsMarked() {
 		p.buf.WriteString(strings.Repeat(" ", indent))
-		p.buf.WriteString(p.color.Color("# [yellow]Warning:[reset] this attribute value will be marked as sensitive and will\n"))
+		p.buf.WriteString(p.color.Color(fmt.Sprintf("# [yellow]Warning:[reset] this %s will be marked as sensitive and will\n", diffType)))
 		p.buf.WriteString(strings.Repeat(" ", indent))
 		p.buf.WriteString(p.color.Color("# not display in UI output after applying this change\n"))
 	}
@@ -1323,7 +1365,7 @@ func (p *blockBodyDiffPrinter) writeSensitivityWarning(old, new cty.Value, inden
 	// Note if changing this attribute will change its sensitivity
 	if old.IsMarked() && !new.IsMarked() {
 		p.buf.WriteString(strings.Repeat(" ", indent))
-		p.buf.WriteString(p.color.Color("# [yellow]Warning:[reset] this attribute value will no longer be marked as sensitive\n"))
+		p.buf.WriteString(p.color.Color(fmt.Sprintf("# [yellow]Warning:[reset] this %s will no longer be marked as sensitive\n", diffType)))
 		p.buf.WriteString(strings.Repeat(" ", indent))
 		p.buf.WriteString(p.color.Color("# after applying this change\n"))
 	}
@@ -1433,11 +1475,23 @@ func ctySequenceDiff(old, new []cty.Value) []*plans.Change {
 	return ret
 }
 
+// ctyEqualValueAndMarks checks equality of two possibly-marked values,
+// considering partially-unknown values and equal values with different marks
+// as inequal
 func ctyEqualWithUnknown(old, new cty.Value) bool {
 	if !old.IsWhollyKnown() || !new.IsWhollyKnown() {
 		return false
 	}
-	return old.Equals(new).True()
+	return ctyEqualValueAndMarks(old, new)
+}
+
+// ctyEqualValueAndMarks checks equality of two possibly-marked values,
+// considering equal values with different marks as inequal
+func ctyEqualValueAndMarks(old, new cty.Value) bool {
+	oldUnmarked, oldMarks := old.UnmarkDeep()
+	newUnmarked, newMarks := new.UnmarkDeep()
+	sameValue := oldUnmarked.Equals(newUnmarked)
+	return sameValue.IsKnown() && sameValue.True() && oldMarks.Equal(newMarks)
 }
 
 // ctyTypesEqual checks equality of two types more loosely

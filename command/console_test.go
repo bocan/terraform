@@ -9,8 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/helper/copy"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/providers"
 	"github.com/mitchellh/cli"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -63,16 +62,17 @@ func TestConsole_tfvars(t *testing.T) {
 	}
 
 	p := testProvider()
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetSchemaResponse = &providers.GetSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"value": {Type: cty.String, Optional: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"value": {Type: cty.String, Optional: true},
+					},
 				},
 			},
 		},
 	}
-
 	ui := cli.NewMockUi()
 	c := &ConsoleCommand{
 		Meta: Meta{
@@ -111,11 +111,13 @@ func TestConsole_unsetRequiredVars(t *testing.T) {
 	defer testFixCwd(t, tmp, cwd)
 
 	p := testProvider()
-	p.GetSchemaReturn = &terraform.ProviderSchema{
-		ResourceTypes: map[string]*configschema.Block{
+	p.GetSchemaResponse = &providers.GetSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Attributes: map[string]*configschema.Attribute{
-					"value": {Type: cty.String, Optional: true},
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"value": {Type: cty.String, Optional: true},
+					},
 				},
 			},
 		},
@@ -149,9 +151,50 @@ func TestConsole_unsetRequiredVars(t *testing.T) {
 	}
 }
 
+func TestConsole_variables(t *testing.T) {
+	tmp, cwd := testCwd(t)
+	defer testFixCwd(t, tmp, cwd)
+
+	p := testProvider()
+	ui := cli.NewMockUi()
+	c := &ConsoleCommand{
+		Meta: Meta{
+			testingOverrides: metaOverridesForProvider(p),
+			Ui:               ui,
+		},
+	}
+
+	commands := map[string]string{
+		"var.foo\n":          "\"bar\"\n",
+		"var.snack\n":        "\"popcorn\"\n",
+		"var.secret_snack\n": "(sensitive)\n",
+		"local.snack_bar\n":  "[\n  \"popcorn\",\n  (sensitive),\n]\n",
+	}
+
+	args := []string{
+		testFixturePath("variables"),
+	}
+
+	for cmd, val := range commands {
+		var output bytes.Buffer
+		defer testStdinPipe(t, strings.NewReader(cmd))()
+		outCloser := testStdoutCapture(t, &output)
+		code := c.Run(args)
+		outCloser()
+		if code != 0 {
+			t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+		}
+
+		actual := output.String()
+		if output.String() != val {
+			t.Fatalf("bad: %q, expected %q", actual, val)
+		}
+	}
+}
+
 func TestConsole_modules(t *testing.T) {
 	td := tempDir(t)
-	copy.CopyDir(testFixturePath("modules"), td)
+	testCopyDir(t, testFixturePath("modules"), td)
 	defer os.RemoveAll(td)
 	defer testChdir(t, td)()
 
